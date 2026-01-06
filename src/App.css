@@ -1,0 +1,199 @@
+#root {
+  width: 100%;
+}
+
+.app {
+  width: min(420px, 100%);
+  margin: 0 auto;
+  padding: 24px 20px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.app-header {
+  text-align: left;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 0.65rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(2rem, 7vw, 2.9rem);
+  font-family: var(--display-font);
+  letter-spacing: -0.02em;
+}
+
+.subhead {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.card-stack {
+  position: relative;
+  height: min(60vh, 420px);
+  min-height: 320px;
+}
+
+.card,
+.empty-card {
+  position: absolute;
+  inset: 0;
+  border-radius: 28px;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.card {
+  cursor: grab;
+  touch-action: pan-y;
+  user-select: none;
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.card.dragging {
+  cursor: grabbing;
+  transition: none;
+  box-shadow: 0 22px 50px rgba(24, 24, 24, 0.2);
+}
+
+.card.swipe-left {
+  transform: translateX(-120%) rotate(-12deg);
+}
+
+.card.swipe-right {
+  transform: translateX(120%) rotate(12deg);
+}
+
+.card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  text-align: center;
+}
+
+.card-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+}
+
+.card-hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.card-badge {
+  position: absolute;
+  top: 18px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.card-badge.accept {
+  left: 18px;
+  background: rgba(31, 183, 132, 0.12);
+  color: var(--accept);
+  border: 1px solid rgba(31, 183, 132, 0.3);
+}
+
+.card-badge.reject {
+  right: 18px;
+  background: rgba(232, 93, 79, 0.12);
+  color: var(--reject);
+  border: 1px solid rgba(232, 93, 79, 0.3);
+}
+
+.empty-card {
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px dashed rgba(0, 0, 0, 0.12);
+  text-align: center;
+}
+
+.empty-title {
+  font-size: 1.4rem;
+  font-weight: 600;
+}
+
+.empty-hint {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.buckets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.bucket {
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 18px;
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.bucket-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.bucket-count {
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+}
+
+.bucket-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.bucket-item {
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.bucket-empty {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+@media (min-width: 720px) {
+  .app {
+    padding: 32px 24px 36px;
+  }
+
+  .card-stack {
+    height: 420px;
+  }
+}
