@@ -1,19 +1,148 @@
-import { useMemo, useRef, useState } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type PointerEvent,
+} from 'react'
 import './App.css'
+import { fetchMatches, sendSwipe } from './api'
+import {
+  fetchMovieDetails,
+  fetchMovieVideos,
+  fetchTopRatedMovies,
+  fetchWatchProviders,
+  getPosterUrl,
+  getProviderLogoUrl,
+  type Movie,
+  type MovieDetails,
+  type MovieVideo,
+  type WatchProviderRegion,
+} from './tmdb'
 
 type SwipeDirection = 'left' | 'right'
 
+type Session = {
+  roomCode: string
+  userId: string
+}
+
+type DetailState = {
+  movieId: number | null
+  isLoading: boolean
+  error: string | null
+  details: MovieDetails | null
+  videos: MovieVideo[]
+  providers: (WatchProviderRegion & { region: string }) | null
+}
+
 const SWIPE_THRESHOLD = 110
+const POLL_INTERVAL = 4000
+const SESSION_STORAGE_KEY = 'movie-matcher-session'
+const PREFETCH_THRESHOLD = 6
+const MAX_TMDB_PAGE = 500
+
+const normalizeRoomCode = (value: string) =>
+  value.replace(/\s+/g, '').toUpperCase()
+
+const createUserId = () => {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID().split('-')[0]
+  }
+
+  return Math.random().toString(36).slice(2, 8)
+}
+
+const loadSession = (): Session | null => {
+  const stored = sessionStorage.getItem(SESSION_STORAGE_KEY)
+  if (!stored) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(stored) as Session
+    if (parsed.roomCode && parsed.userId) {
+      return parsed
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+const saveSession = (session: Session | null) => {
+  if (!session) {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY)
+    return
+  }
+
+  sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session))
+}
+
+const getRegion = () => 'US'
+
+const formatRuntime = (runtime?: number) => {
+  if (!runtime) {
+    return '—'
+  }
+
+  const hours = Math.floor(runtime / 60)
+  const minutes = runtime % 60
+  if (hours === 0) {
+    return `${minutes}m`
+  }
+
+  return `${hours}h ${minutes}m`
+}
+
+const formatDate = (date?: string) => {
+  if (!date) {
+    return '—'
+  }
+
+  const parsed = new Date(date)
+  if (Number.isNaN(parsed.getTime())) {
+    return date
+  }
+
+  return parsed.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
 
 function App() {
-  const deck = useMemo(
-    () => Array.from({ length: 100 }, (_, index) => `Card ${index + 1}`),
-    [],
-  )
+  const [session, setSession] = useState<Session | null>(null)
+  const [roomInput, setRoomInput] = useState('')
+  const [draftUserId, setDraftUserId] = useState(() => createUserId())
+  const [lobbyError, setLobbyError] = useState<string | null>(null)
+
+  const [movies, setMovies] = useState<Movie[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
-  const activeCard = deck[currentIndex] ?? null
-  const [accepted, setAccepted] = useState<string[]>([])
-  const [rejected, setRejected] = useState<string[]>([])
+  const [isLoadingMovies, setIsLoadingMovies] = useState(false)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [moviesError, setMoviesError] = useState<string | null>(null)
+  const [page, setPage] = useState(0)
+  const [hasMore, setHasMore] = useState(true)
+
+  const [matches, setMatches] = useState<number[]>([])
+  const [newMatches, setNewMatches] = useState<number[]>([])
+  const [showMatchNotice, setShowMatchNotice] = useState(false)
+  const [pollError, setPollError] = useState<string | null>(null)
+  const [swipeError, setSwipeError] = useState<string | null>(null)
+  const [expandedMovieId, setExpandedMovieId] = useState<number | null>(null)
+  const [detailState, setDetailState] = useState<DetailState>({
+    movieId: null,
+    isLoading: false,
+    error: null,
+    details: null,
+    videos: [],
+    providers: null,
+  })
+
   const [dragX, setDragX] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
   const [swipeDirection, setSwipeDirection] = useState<SwipeDirection | null>(
@@ -22,28 +151,345 @@ function App() {
 
   const startXRef = useRef(0)
   const pointerIdRef = useRef<number | null>(null)
+  const loadingPageRef = useRef<number | null>(null)
+  const apiKey = import.meta.env.VITE_TMDB_API_KEY as string | undefined
 
-  const finalizeSwipe = (direction: SwipeDirection) => {
-    if (!activeCard) {
+  useEffect(() => {
+    const stored = loadSession()
+    if (stored) {
+      setSession(stored)
+      setRoomInput(stored.roomCode)
+    }
+  }, [])
+
+  const loadMovies = (pageToLoad: number, replace: boolean) => {
+    if (!apiKey) {
+      setMoviesError('Add VITE_TMDB_API_KEY to your environment to load movies.')
+      setIsLoadingMovies(false)
+      setIsLoadingMore(false)
+      if (replace) {
+        setMovies([])
+      }
+      setHasMore(false)
       return
     }
 
-    const card = activeCard
-    setSwipeDirection(direction)
-    window.setTimeout(() => {
-      if (direction === 'right') {
-        setAccepted((prev) => [...prev, card])
-      } else {
-        setRejected((prev) => [...prev, card])
+    if (loadingPageRef.current === pageToLoad) {
+      return
+    }
+
+    loadingPageRef.current = pageToLoad
+    if (replace) {
+      setIsLoadingMovies(true)
+    } else {
+      setIsLoadingMore(true)
+    }
+    setMoviesError(null)
+
+    fetchTopRatedMovies(apiKey, pageToLoad)
+      .then((results) => {
+        const filtered = results.filter((movie) => movie.poster_path)
+        setMovies((prev) => (replace ? filtered : [...prev, ...filtered]))
+        setPage(pageToLoad)
+        if (results.length === 0 || pageToLoad >= MAX_TMDB_PAGE) {
+          setHasMore(false)
+        }
+      })
+      .catch(() => {
+        setMoviesError('Unable to load movies from TMDB right now.')
+      })
+      .finally(() => {
+        if (replace) {
+          setIsLoadingMovies(false)
+        } else {
+          setIsLoadingMore(false)
+        }
+        loadingPageRef.current = null
+      })
+  }
+
+  useEffect(() => {
+    if (!session) {
+      return
+    }
+
+    setMovies([])
+    setCurrentIndex(0)
+    setPage(0)
+    setHasMore(true)
+    setIsLoadingMore(false)
+    loadMovies(1, true)
+  }, [session])
+
+  useEffect(() => {
+    if (!session) {
+      return
+    }
+
+    let isActive = true
+    const poll = async () => {
+      try {
+        const ids = await fetchMatches(session.roomCode)
+        if (!isActive) {
+          return
+        }
+
+        setPollError(null)
+        setMatches((prev) => {
+          const next = Array.from(new Set(ids))
+          const added = next.filter((id) => !prev.includes(id))
+          if (added.length > 0) {
+            setNewMatches(added)
+            setShowMatchNotice(true)
+          }
+          return next
+        })
+      } catch {
+        if (!isActive) {
+          return
+        }
+
+        setPollError('Waiting for match updates...')
       }
+    }
+
+    poll()
+    const intervalId = window.setInterval(poll, POLL_INTERVAL)
+
+    return () => {
+      isActive = false
+      window.clearInterval(intervalId)
+    }
+  }, [session])
+
+  useEffect(() => {
+    if (!session || !hasMore || isLoadingMovies || isLoadingMore) {
+      return
+    }
+
+    const remaining = movies.length - currentIndex
+    if (remaining <= PREFETCH_THRESHOLD) {
+      const nextPage = page > 0 ? page + 1 : 1
+      if (nextPage <= MAX_TMDB_PAGE) {
+        loadMovies(nextPage, false)
+      }
+    }
+  }, [
+    session,
+    hasMore,
+    isLoadingMovies,
+    isLoadingMore,
+    movies.length,
+    currentIndex,
+    page,
+  ])
+
+  useEffect(() => {
+    if (!session || !hasMore || isLoadingMovies || isLoadingMore) {
+      return
+    }
+
+    const hasActiveMovie = Boolean(movies[currentIndex])
+    if (!hasActiveMovie && movies.length > 0) {
+      const nextPage = page > 0 ? page + 1 : 1
+      if (nextPage <= MAX_TMDB_PAGE) {
+        loadMovies(nextPage, false)
+      }
+    }
+  }, [
+    session,
+    hasMore,
+    isLoadingMovies,
+    isLoadingMore,
+    movies.length,
+    currentIndex,
+    page,
+  ])
+
+  useEffect(() => {
+    if (!expandedMovieId) {
+      setDetailState({
+        movieId: null,
+        isLoading: false,
+        error: null,
+        details: null,
+        videos: [],
+        providers: null,
+      })
+      return
+    }
+
+    if (!apiKey) {
+      setDetailState({
+        movieId: expandedMovieId,
+        isLoading: false,
+        error: 'Add VITE_TMDB_API_KEY to load movie details.',
+        details: null,
+        videos: [],
+        providers: null,
+      })
+      return
+    }
+
+    let isActive = true
+    const region = getRegion()
+    setDetailState({
+      movieId: expandedMovieId,
+      isLoading: true,
+      error: null,
+      details: null,
+      videos: [],
+      providers: null,
+    })
+
+    Promise.all([
+      fetchMovieDetails(apiKey, expandedMovieId),
+      fetchMovieVideos(apiKey, expandedMovieId),
+      fetchWatchProviders(apiKey, expandedMovieId, region),
+    ])
+      .then(([details, videos, providers]) => {
+        if (!isActive) {
+          return
+        }
+
+        setDetailState({
+          movieId: expandedMovieId,
+          isLoading: false,
+          error: null,
+          details,
+          videos,
+          providers,
+        })
+      })
+      .catch(() => {
+        if (!isActive) {
+          return
+        }
+
+        setDetailState({
+          movieId: expandedMovieId,
+          isLoading: false,
+          error: 'Unable to load movie details right now.',
+          details: null,
+          videos: [],
+          providers: null,
+        })
+      })
+
+    return () => {
+      isActive = false
+    }
+  }, [expandedMovieId])
+
+  useEffect(() => {
+    const original = document.body.style.overflow
+    if (expandedMovieId) {
+      document.body.style.overflow = 'hidden'
+    } else {
+      document.body.style.overflow = original
+    }
+
+    return () => {
+      document.body.style.overflow = original
+    }
+  }, [expandedMovieId])
+
+  const activeMovie = movies[currentIndex] ?? null
+  const nextMovie = movies[currentIndex + 1] ?? null
+
+  const movieLookup = useMemo(() => {
+    return new Map(movies.map((movie) => [movie.id, movie]))
+  }, [movies])
+
+  const activeDetailState =
+    detailState.movieId === expandedMovieId ? detailState : null
+  const detailMovie = activeDetailState?.details ?? (expandedMovieId
+    ? movieLookup.get(expandedMovieId) ?? null
+    : null)
+  const detailPoster = getPosterUrl(detailMovie?.poster_path ?? null)
+  const detailOverview = detailMovie?.overview ?? ''
+  const ratingValue =
+    activeDetailState?.details?.vote_average ?? detailMovie?.vote_average
+  const voteCount =
+    activeDetailState?.details?.vote_count ?? detailMovie?.vote_count
+  const detailGenres =
+    activeDetailState?.details?.genres?.map((genre) => genre.name).join(', ') ??
+    '—'
+  const detailLanguages =
+    activeDetailState?.details?.spoken_languages
+      ?.map((lang) => lang.english_name ?? lang.name)
+      .filter(Boolean)
+      .join(', ') ?? '—'
+  const detailCompanies =
+    activeDetailState?.details?.production_companies
+      ?.slice(0, 3)
+      .map((company) => company.name)
+      .join(', ') ?? '—'
+  const trailer =
+    (activeDetailState?.videos ?? []).find(
+      (video) =>
+        video.site === 'YouTube' &&
+        (video.type === 'Trailer' || video.type === 'Teaser'),
+    ) ?? (activeDetailState?.videos ?? []).find((video) => video.site === 'YouTube')
+  const youtubeUrl = trailer
+    ? `https://www.youtube.com/watch?v=${trailer.key}`
+    : null
+  const imdbUrl = activeDetailState?.details?.imdb_id
+    ? `https://www.imdb.com/title/${activeDetailState.details.imdb_id}/`
+    : null
+  const detailLoading =
+    activeDetailState?.isLoading ?? (expandedMovieId !== null && !activeDetailState)
+  const detailError = activeDetailState?.error ?? null
+  const detailProviders = activeDetailState?.providers ?? null
+  const homepageUrl = activeDetailState?.details?.homepage ?? null
+  const tmdbWatchUrl = detailProviders?.link ?? null
+
+  const providerGroups = detailProviders
+    ? [
+        {
+          label: 'Stream',
+          items: detailProviders.flatrate ?? [],
+        },
+        {
+          label: 'Rent',
+          items: detailProviders.rent ?? [],
+        },
+        {
+          label: 'Buy',
+          items: detailProviders.buy ?? [],
+        },
+      ].filter((group) => group.items.length > 0)
+    : []
+
+  const finalizeSwipe = (direction: SwipeDirection) => {
+    if (!activeMovie || !session) {
+      return
+    }
+
+    const card = activeMovie
+    setSwipeDirection(direction)
+
+    if (direction === 'right') {
+      setSwipeError(null)
+      void sendSwipe({
+        roomCode: session.roomCode,
+        userId: session.userId,
+        movieId: card.id,
+        direction,
+      }).catch(() => {
+        setSwipeError('Unable to reach the server for your swipe.')
+      })
+    }
+
+    window.setTimeout(() => {
       setCurrentIndex((prev) => prev + 1)
       setSwipeDirection(null)
       setDragX(0)
     }, 220)
   }
 
-  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!activeCard) {
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (!activeMovie || swipeDirection) {
       return
     }
 
@@ -53,7 +499,7 @@ function App() {
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
-  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (!isDragging || pointerIdRef.current !== event.pointerId) {
       return
     }
@@ -62,7 +508,7 @@ function App() {
     setDragX(dx)
   }
 
-  const handlePointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (pointerIdRef.current !== event.pointerId) {
       return
     }
@@ -82,6 +528,64 @@ function App() {
     setDragX(0)
     setIsDragging(false)
     pointerIdRef.current = null
+  }
+
+  const handleJoin = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const normalized = normalizeRoomCode(roomInput)
+    if (!normalized) {
+      setLobbyError('Enter a room code to continue.')
+      return
+    }
+
+    const nextSession = {
+      roomCode: normalized,
+      userId: draftUserId,
+    }
+
+    setRoomInput(normalized)
+    setSession(nextSession)
+    saveSession(nextSession)
+    setLobbyError(null)
+    setMatches([])
+    setNewMatches([])
+    setShowMatchNotice(false)
+    setPollError(null)
+    setSwipeError(null)
+    setExpandedMovieId(null)
+  }
+
+  const handleLeave = () => {
+    setSession(null)
+    saveSession(null)
+    setRoomInput('')
+    setDraftUserId(createUserId())
+    setMovies([])
+    setCurrentIndex(0)
+    setPage(0)
+    setHasMore(true)
+    setIsLoadingMovies(false)
+    setIsLoadingMore(false)
+    setMatches([])
+    setNewMatches([])
+    setShowMatchNotice(false)
+    setSwipeError(null)
+    setPollError(null)
+    setExpandedMovieId(null)
+  }
+
+  const handleReloadMovies = () => {
+    if (!session) {
+      return
+    }
+
+    setMovies([])
+    setCurrentIndex(0)
+    setPage(0)
+    setHasMore(true)
+    setMoviesError(null)
+    setIsLoadingMore(false)
+    loadMovies(1, true)
   }
 
   const actionLabel =
@@ -105,86 +609,467 @@ function App() {
     .filter(Boolean)
     .join(' ')
 
+  const isLoadingDeck = isLoadingMovies || isLoadingMore
+  const emptyTitle = hasMore ? 'Loading more movies' : 'No more movies'
+  const emptyHint = hasMore
+    ? 'Fetching another batch from TMDB.'
+    : 'Try again later for more picks.'
+
+  const renderMatchItem = (id: number) => {
+    const movie = movieLookup.get(id)
+    const poster = movie ? getPosterUrl(movie.poster_path) : null
+
+    return (
+      <div className="match-item" key={`match-${id}`}>
+        {poster ? (
+          <img className="match-thumb" src={poster} alt={movie?.title ?? ''} />
+        ) : (
+          <div className="match-thumb fallback">#{id}</div>
+        )}
+        <div className="match-info">
+          <span className="match-title">{movie?.title ?? `Movie #${id}`}</span>
+          {movie?.release_date ? (
+            <span className="match-sub">{movie.release_date.slice(0, 4)}</span>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <header className="app-header">
         <p className="eyebrow">Movie Matcher</p>
-        <h1>Swipe to decide</h1>
-        <p className="subhead">Right to accept, left to reject.</p>
+        <h1>{session ? 'Swipe together' : 'Find the movie'}</h1>
+        <p className="subhead">
+          {session
+            ? 'Swipe right when you both want to watch it.'
+            : 'Join a room and start swiping.'}
+        </p>
+        {session ? (
+          <div className="room-meta">
+            <span className="room-pill">Room {session.roomCode}</span>
+            <span className="room-pill">User {session.userId}</span>
+            <button type="button" className="link-button" onClick={handleLeave}>
+              Change room
+            </button>
+          </div>
+        ) : null}
       </header>
 
-      <main className="card-stack">
-        {activeCard ? (
-          <div
-            className={cardClassName}
-            style={cardStyle}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerCancel}
-            role="button"
-            aria-label="Swipe card"
-          >
-            <div className="card-content">
-              <span className="card-title">{activeCard}</span>
-              <span className="card-hint">Drag me left or right</span>
-            </div>
-            {actionLabel ? (
-              <div
-                className={`card-badge ${
-                  actionLabel === 'Accept' ? 'accept' : 'reject'
-                }`}
+      {!session ? (
+        <main className="lobby">
+          <form className="lobby-card" onSubmit={handleJoin}>
+            <label htmlFor="roomCode">Room code</label>
+            <input
+              id="roomCode"
+              type="text"
+              value={roomInput}
+              onChange={(event) => {
+                setRoomInput(event.target.value.toUpperCase())
+                setLobbyError(null)
+              }}
+              placeholder="Enter code"
+              autoComplete="off"
+              inputMode="text"
+            />
+            {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
+            <button type="submit" className="button primary">
+              Join room
+            </button>
+          </form>
+          <div className="lobby-card">
+            <div className="lobby-row">
+              <div>
+                <p className="lobby-label">Your user id</p>
+                <p className="lobby-value">{draftUserId}</p>
+              </div>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => setDraftUserId(createUserId())}
               >
-                {actionLabel}
+                New id
+              </button>
+            </div>
+            <p className="lobby-hint">
+              Keep this device in the room to stay in sync.
+            </p>
+          </div>
+        </main>
+      ) : (
+        <main className="swiper">
+          {pollError || moviesError || swipeError ? (
+            <div className="status-row">
+              {pollError ? (
+                <span className="status-chip muted">{pollError}</span>
+              ) : null}
+              {moviesError && movies.length > 0 ? (
+                <span className="status-chip error">{moviesError}</span>
+              ) : null}
+              {swipeError ? (
+                <span className="status-chip error">{swipeError}</span>
+              ) : null}
+            </div>
+          ) : null}
+
+          <section className="card-stack">
+            {nextMovie ? (
+              <div className="card next" aria-hidden="true">
+                <div className="card-media">
+                  {getPosterUrl(nextMovie.poster_path) ? (
+                    <img
+                      src={getPosterUrl(nextMovie.poster_path) ?? ''}
+                      alt=""
+                    />
+                  ) : (
+                    <div className="poster-fallback">Poster unavailable</div>
+                  )}
+                  <div className="card-gradient" />
+                  <div className="card-info">
+                    <span className="card-title">{nextMovie.title}</span>
+                    {nextMovie.release_date ? (
+                      <span className="card-sub">
+                        {nextMovie.release_date.slice(0, 4)}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             ) : null}
-          </div>
-        ) : (
-          <div className="empty-card">
-            <span className="empty-title">No more cards</span>
-            <span className="empty-hint">
-              You swiped through all 100 cards.
-            </span>
-          </div>
-        )}
-      </main>
 
-      <section className="buckets">
-        <div className="bucket">
-          <div className="bucket-header">
-            <span>Accepted</span>
-            <span className="bucket-count">{accepted.length}</span>
-          </div>
-          <div className="bucket-items">
-            {accepted.length === 0 ? (
-              <span className="bucket-empty">None yet</span>
+            {activeMovie ? (
+              <div
+                className={cardClassName}
+                style={cardStyle}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerEnd}
+                onPointerCancel={handlePointerCancel}
+                role="button"
+                aria-label={`Swipe ${activeMovie.title}`}
+              >
+                <div className="card-media">
+                  {getPosterUrl(activeMovie.poster_path) ? (
+                    <img
+                      src={getPosterUrl(activeMovie.poster_path) ?? ''}
+                      alt={activeMovie.title}
+                    />
+                  ) : (
+                    <div className="poster-fallback">Poster unavailable</div>
+                  )}
+                  <div className="card-gradient" />
+                  <div className="card-info">
+                    <div className="card-meta">
+                      <span className="card-title">{activeMovie.title}</span>
+                      {activeMovie.release_date ? (
+                        <span className="card-sub">
+                          {activeMovie.release_date.slice(0, 4)}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="card-overview">
+                      {activeMovie.overview ||
+                        'No description available for this title.'}
+                    </p>
+                    {typeof activeMovie.vote_average === 'number' ? (
+                      <span className="card-sub">
+                        Rating {activeMovie.vote_average.toFixed(1)}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="card-details"
+                      onClick={() => setExpandedMovieId(activeMovie.id)}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onPointerUp={(event) => event.stopPropagation()}
+                    >
+                      Full details
+                    </button>
+                  </div>
+                </div>
+                {actionLabel ? (
+                  <div
+                    className={`card-badge ${
+                      actionLabel === 'Accept' ? 'accept' : 'reject'
+                    }`}
+                  >
+                    {actionLabel}
+                  </div>
+                ) : null}
+              </div>
             ) : (
-              accepted.map((card) => (
-                <span className="bucket-item" key={`accept-${card}`}>
-                  {card}
-                </span>
-              ))
+              <div className="empty-card">
+                <span className="empty-title">{emptyTitle}</span>
+                <span className="empty-hint">{emptyHint}</span>
+                {!hasMore || moviesError ? (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={handleReloadMovies}
+                    disabled={isLoadingDeck}
+                  >
+                    Try again
+                  </button>
+                ) : null}
+              </div>
             )}
+
+            {moviesError && movies.length === 0 ? (
+              <div className="overlay-status">
+                <p>{moviesError}</p>
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={handleReloadMovies}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+          </section>
+
+          <div className="action-row">
+            <button
+              type="button"
+              className="action-button reject"
+              onClick={() => finalizeSwipe('left')}
+              disabled={!activeMovie || swipeDirection !== null}
+            >
+              Reject
+            </button>
+            <button
+              type="button"
+              className="action-button accept"
+              onClick={() => finalizeSwipe('right')}
+              disabled={!activeMovie || swipeDirection !== null}
+            >
+              Accept
+            </button>
+          </div>
+
+          <section className="matches-panel">
+            <div className="matches-header">
+              <h2>Matches</h2>
+              <span className="matches-count">{matches.length}</span>
+            </div>
+            {matches.length === 0 ? (
+              <p className="matches-empty">No matches yet.</p>
+            ) : (
+              <div className="match-list">{matches.map(renderMatchItem)}</div>
+            )}
+          </section>
+        </main>
+      )}
+
+      {showMatchNotice ? (
+        <div className="match-notice" role="dialog" aria-live="assertive">
+          <div className="match-notice-card">
+            <h3>It&apos;s a match!</h3>
+            <p>Everyone in the room liked these titles.</p>
+            <div className="match-list">
+              {newMatches.map(renderMatchItem)}
+            </div>
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => {
+                setShowMatchNotice(false)
+                setNewMatches([])
+              }}
+            >
+              Keep swiping
+            </button>
           </div>
         </div>
-        <div className="bucket">
-          <div className="bucket-header">
-            <span>Rejected</span>
-            <span className="bucket-count">{rejected.length}</span>
-          </div>
-          <div className="bucket-items">
-            {rejected.length === 0 ? (
-              <span className="bucket-empty">None yet</span>
-            ) : (
-              rejected.map((card) => (
-                <span className="bucket-item" key={`reject-${card}`}>
-                  {card}
+      ) : null}
+
+      {expandedMovieId ? (
+        <div className="details-sheet" role="dialog" aria-modal="true">
+          <div className="details-card">
+            <div className="details-header">
+              {detailPoster ? (
+                <img
+                  className="details-poster"
+                  src={detailPoster}
+                  alt={detailMovie?.title ?? 'Movie poster'}
+                />
+              ) : (
+                <div className="details-poster fallback">Poster unavailable</div>
+              )}
+              <div className="details-header-text">
+                <h2>{detailMovie?.title ?? 'Movie details'}</h2>
+                {activeDetailState?.details?.tagline ? (
+                  <p className="details-tagline">
+                    {activeDetailState.details.tagline}
+                  </p>
+                ) : null}
+                {activeDetailState?.details?.status ? (
+                  <span className="details-status">
+                    {activeDetailState.details.status}
+                  </span>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                className="details-close"
+                onClick={() => setExpandedMovieId(null)}
+                aria-label="Close details"
+              >
+                Close
+              </button>
+            </div>
+
+            {detailLoading ? (
+              <p className="details-loading">Loading details...</p>
+            ) : null}
+            {detailError ? (
+              <p className="details-error">{detailError}</p>
+            ) : null}
+
+            <div className="details-actions">
+              {youtubeUrl ? (
+                <a
+                  className="button secondary"
+                  href={youtubeUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Watch trailer
+                </a>
+              ) : null}
+              {imdbUrl ? (
+                <a
+                  className="button secondary"
+                  href={imdbUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  IMDb
+                </a>
+              ) : null}
+              {homepageUrl ? (
+                <a
+                  className="button secondary"
+                  href={homepageUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Official site
+                </a>
+              ) : null}
+              {tmdbWatchUrl ? (
+                <a
+                  className="button secondary"
+                  href={tmdbWatchUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  TMDB watch
+                </a>
+              ) : null}
+            </div>
+
+            <div className="details-grid">
+              <div>
+                <span className="details-label">Release</span>
+                <span>{formatDate(detailMovie?.release_date)}</span>
+              </div>
+              <div>
+                <span className="details-label">Runtime</span>
+                <span>{formatRuntime(activeDetailState?.details?.runtime)}</span>
+              </div>
+              <div>
+                <span className="details-label">Rating</span>
+                <span>
+                  {typeof ratingValue === 'number'
+                    ? `${ratingValue.toFixed(1)} / 10`
+                    : '—'}
+                  {typeof voteCount === 'number'
+                    ? ` (${voteCount.toLocaleString()} votes)`
+                    : ''}
                 </span>
-              ))
-            )}
+              </div>
+              <div>
+                <span className="details-label">Genres</span>
+                <span>{detailGenres}</span>
+              </div>
+              <div>
+                <span className="details-label">Languages</span>
+                <span>{detailLanguages}</span>
+              </div>
+              <div>
+                <span className="details-label">Studios</span>
+                <span>{detailCompanies}</span>
+              </div>
+            </div>
+
+            <div className="details-section">
+              <h3>Overview</h3>
+              <p className="details-overview">
+                {detailOverview || 'No overview available yet.'}
+              </p>
+            </div>
+
+            <div className="details-section">
+              <div className="details-section-header">
+                <h3>Where to watch</h3>
+                {detailProviders?.region ? (
+                  <span className="details-label">
+                    Region {detailProviders.region}
+                  </span>
+                ) : null}
+              </div>
+              {providerGroups.length === 0 ? (
+                <p className="details-empty">
+                  Streaming info is not available for this region.
+                </p>
+              ) : (
+                <div className="provider-groups">
+                  {providerGroups.map((group) => (
+                    <div className="provider-group" key={group.label}>
+                      <span className="details-label">{group.label}</span>
+                      <div className="provider-list">
+                        {group.items.map((provider) => {
+                          const logo = getProviderLogoUrl(
+                            provider.logo_path ?? null,
+                          )
+                          return (
+                            <div
+                              className="provider-item"
+                              key={`${group.label}-${provider.provider_id}`}
+                            >
+                              {logo ? (
+                                <img
+                                  src={logo}
+                                  alt={provider.provider_name}
+                                />
+                              ) : (
+                                <div className="provider-fallback">
+                                  {provider.provider_name.slice(0, 2)}
+                                </div>
+                              )}
+                              <span>{provider.provider_name}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => setExpandedMovieId(null)}
+            >
+              Back to swiping
+            </button>
           </div>
         </div>
-      </section>
+      ) : null}
     </div>
   )
 }

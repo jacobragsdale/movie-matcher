@@ -124,28 +124,28 @@ Clean Up: Ensure the mobile view looks correct (meta tags for iPhone PWA status)
 
 7. Remaining Work Checklist (Small, Concrete Steps)
 Frontend (React)
-- Add a Lobby view with room code input and a generated user id; persist both in sessionStorage.
-- Split the UI into Lobby + Swiper views and switch based on room/user state.
-- Add a `tmdb.ts` fetch helper and wire `VITE_TMDB_API_KEY` into the client.
-- Replace the placeholder card deck with real TMDB movies (poster, title, year).
-- On right swipe, `POST /api/swipe` with room_code, user_id, movie_id, direction.
-- Implement polling every 3-5 seconds to `GET /api/matches/{room_code}` and display a match modal/banner.
+- [x] Add a Lobby view with room code input and a generated user id; persist both in sessionStorage.
+- [x] Split the UI into Lobby + Swiper views and switch based on room/user state.
+- [x] Add a `tmdb.ts` fetch helper and wire `VITE_TMDB_API_KEY` into the client.
+- [x] Replace the placeholder card deck with real TMDB movies (poster, title, year).
+- [x] On right swipe, `POST /api/swipe` with room_code, user_id, movie_id, direction.
+- [x] Implement polling every 3-5 seconds to `GET /api/matches/{room_code}` and display a match modal/banner.
 
 Backend (FastAPI + SQLite)
-- Create a `backend/` folder with `requirements.txt` (fastapi, uvicorn).
-- Add `backend/main.py` with a FastAPI app and CORS for local dev.
-- Add a SQLite helper to create the `swipes` table with a unique (room_code, user_id, movie_id) constraint.
-- Implement `POST /api/swipe` with an idempotent upsert (ignore or update on conflict).
-- Implement `GET /api/matches/{room_code}` with a SQL GROUP BY + COUNT >= MATCH_THRESHOLD.
-- Serve the built frontend from `/` using StaticFiles and a catch-all route to `index.html`.
+- [ ] Create a `backend/` folder with `requirements.txt` (fastapi, uvicorn).
+- [ ] Add `backend/main.py` with a FastAPI app and CORS for local dev.
+- [ ] Add a SQLite helper to create the `swipes` table with a unique (room_code, user_id, movie_id) constraint.
+- [ ] Implement `POST /api/swipe` with an idempotent upsert (ignore or update on conflict).
+- [ ] Implement `GET /api/matches/{room_code}` with a SQL GROUP BY + COUNT >= MATCH_THRESHOLD.
+- [ ] Serve the built frontend from `/` using StaticFiles and a catch-all route to `index.html`.
 
 Integration & PWA
-- Add a Vite dev proxy for `/api` to the FastAPI server.
-- Add `public/manifest.webmanifest` and app icons (192, 512, Apple 180).
-- Update `index.html` with `viewport-fit=cover` and iOS PWA meta tags.
-- Add `.env.example` documenting `VITE_TMDB_API_KEY` and backend envs.
+- [ ] Add a Vite dev proxy for `/api` to the FastAPI server.
+- [ ] Add `public/manifest.webmanifest` and app icons (192, 512, Apple 180).
+- [ ] Update `index.html` with `viewport-fit=cover` and iOS PWA meta tags.
+- [ ] Add `.env.example` documenting `VITE_TMDB_API_KEY` and backend envs.
 
 Docker & Deployment
-- Add a multi-stage `Dockerfile` (Node build -> Python runner).
-- Store the SQLite file at `/data/movie_matcher.db` and document the volume mount.
-- Verify `npm run build` + container run locally, then use `npm run preview` only for frontend-only checks.
+- [ ] Add a multi-stage `Dockerfile` (Node build -> Python runner).
+- [ ] Store the SQLite file at `/data/movie_matcher.db` and document the volume mount.
+- [ ] Verify `npm run build` + container run locally, then use `npm run preview` only for frontend-only checks.
