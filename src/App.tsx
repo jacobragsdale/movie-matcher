@@ -702,11 +702,11 @@ function App() {
     <div className="app">
       <header className="app-header">
         <p className="eyebrow">Movie Matcher</p>
-        <h1>{session ? 'Swipe together' : 'Find the movie'}</h1>
+        <h1>{session ? 'Swipe together' : 'Find your movie match'}</h1>
         <p className="subhead">
           {session
             ? 'Swipe right when you both want to watch it.'
-            : 'Join a room and start swiping.'}
+            : 'Create or join a room and start swiping.'}
         </p>
         {!session ? (
           <button
@@ -1221,13 +1221,6 @@ function App() {
               <p>
                 Pick a genre and streaming services to focus the deck. Choose
                 “Any” to keep it wide open.
-              </p>
-            </div>
-            <div className="help-section">
-              <h3>User id</h3>
-              <p>
-                Each device gets a user id so the room knows your swipes. Tap
-                “New id” if you want to reset it.
               </p>
             </div>
             <div className="help-section">
