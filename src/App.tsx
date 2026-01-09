@@ -730,7 +730,7 @@ function App() {
               </span>
             ) : null}
             <button type="button" className="link-button" onClick={handleReset}>
-              Reset
+              Exit room
             </button>
           </div>
         ) : null}
@@ -751,6 +751,12 @@ function App() {
               placeholder="Enter code"
               autoComplete="off"
               inputMode="text"
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  event.currentTarget.blur()
+                }
+              }}
             />
             <label htmlFor="genreSelect">Genre</label>
             <select
