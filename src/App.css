@@ -151,35 +151,16 @@
   height: 16px;
 }
 
-.lobby-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.lobby-label {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-.lobby-value {
-  margin: 4px 0 0;
-  font-size: 1.2rem;
-  font-weight: 700;
-}
-
-.lobby-hint {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--muted);
-}
-
 .form-error {
   margin: 0;
   font-size: 0.85rem;
   color: var(--reject);
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .button {

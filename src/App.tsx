@@ -614,7 +614,7 @@ function App() {
     setExpandedMovieId(null)
   }
 
-  const handleLeave = () => {
+  const handleReset = () => {
     setSession(null)
     saveSession(null)
     setRoomInput('')
@@ -633,6 +633,7 @@ function App() {
     setSwipeError(null)
     setPollError(null)
     setExpandedMovieId(null)
+    setShowHelp(false)
   }
 
   const handleReloadMovies = () => {
@@ -720,7 +721,6 @@ function App() {
         {session ? (
           <div className="room-meta">
             <span className="room-pill">Room {session.roomCode}</span>
-            <span className="room-pill">User {session.userId}</span>
             {session.genreId ? (
               <span className="room-pill">Genre {activeGenreLabel}</span>
             ) : null}
@@ -729,8 +729,8 @@ function App() {
                 Services {activeProviderLabels.join(', ')}
               </span>
             ) : null}
-            <button type="button" className="link-button" onClick={handleLeave}>
-              Change room
+            <button type="button" className="link-button" onClick={handleReset}>
+              Reset
             </button>
           </div>
         ) : null}
@@ -798,28 +798,19 @@ function App() {
               ))}
             </div>
             {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
-            <button type="submit" className="button primary">
-              Join room
-            </button>
-          </form>
-          <div className="lobby-card">
-            <div className="lobby-row">
-              <div>
-                <p className="lobby-label">Your user id</p>
-                <p className="lobby-value">{draftUserId}</p>
-              </div>
+            <div className="form-actions">
+              <button type="submit" className="button primary">
+                Join room
+              </button>
               <button
                 type="button"
                 className="button secondary"
-                onClick={() => setDraftUserId(createUserId())}
+                onClick={handleReset}
               >
-                New id
+                Reset
               </button>
             </div>
-            <p className="lobby-hint">
-              Keep this device in the room to stay in sync.
-            </p>
-          </div>
+          </form>
         </main>
       ) : (
         <main className="swiper">

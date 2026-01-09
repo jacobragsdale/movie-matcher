@@ -65,7 +65,7 @@ export const getProviderLogoUrl = (path: string | null) => {
   return `${TMDB_LOGO_BASE}${path}`
 }
 
-const MIN_VOTE_COUNT = 1000
+const MIN_VOTE_COUNT = 250
 
 export const fetchDiscoverMovies = async (
   apiKey: string,
