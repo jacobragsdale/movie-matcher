@@ -4,14 +4,15 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
 } from 'react'
 import './App.css'
 import { fetchMatches, sendSwipe } from './api'
 import {
+  fetchDiscoverMovies,
   fetchMovieDetails,
   fetchMovieVideos,
-  fetchTopRatedMovies,
   fetchWatchProviders,
   getPosterUrl,
   getProviderLogoUrl,
@@ -26,6 +27,8 @@ type SwipeDirection = 'left' | 'right'
 type Session = {
   roomCode: string
   userId: string
+  genreId: number | null
+  providerIds: number[]
 }
 
 type DetailState = {
@@ -42,6 +45,30 @@ const POLL_INTERVAL = 4000
 const SESSION_STORAGE_KEY = 'movie-matcher-session'
 const PREFETCH_THRESHOLD = 6
 const MAX_TMDB_PAGE = 500
+
+const GENRE_OPTIONS = [
+  { id: null, label: 'Any' },
+  { id: 28, label: 'Action' },
+  { id: 35, label: 'Comedy' },
+  { id: 18, label: 'Drama' },
+  { id: 53, label: 'Thriller' },
+  { id: 27, label: 'Horror' },
+  { id: 10749, label: 'Romance' },
+  { id: 878, label: 'Science Fiction' },
+  { id: 12, label: 'Adventure' },
+  { id: 16, label: 'Animation' },
+  { id: 99, label: 'Documentary' },
+]
+
+const PROVIDER_OPTIONS = [
+  { id: 8, label: 'Netflix' },
+  { id: 15, label: 'Hulu' },
+  { id: 9, label: 'Prime Video' },
+  { id: 384, label: 'HBO Max' },
+  { id: 531, label: 'Paramount+' },
+  { id: 337, label: 'Disney+' },
+  { id: 350, label: 'Apple TV+' },
+]
 
 const normalizeRoomCode = (value: string) =>
   value.replace(/\s+/g, '').toUpperCase()
@@ -61,9 +88,16 @@ const loadSession = (): Session | null => {
   }
 
   try {
-    const parsed = JSON.parse(stored) as Session
+    const parsed = JSON.parse(stored) as Partial<Session>
     if (parsed.roomCode && parsed.userId) {
-      return parsed
+      return {
+        roomCode: parsed.roomCode,
+        userId: parsed.userId,
+        genreId: typeof parsed.genreId === 'number' ? parsed.genreId : null,
+        providerIds: Array.isArray(parsed.providerIds)
+          ? parsed.providerIds.filter((id): id is number => typeof id === 'number')
+          : [],
+      }
     }
   } catch {
     return null
@@ -80,6 +114,12 @@ const saveSession = (session: Session | null) => {
 
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session))
 }
+
+const openExternal =
+  (url: string) => (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
 
 const getRegion = () => 'US'
 
@@ -118,7 +158,10 @@ function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [roomInput, setRoomInput] = useState('')
   const [draftUserId, setDraftUserId] = useState(() => createUserId())
+  const [selectedGenreId, setSelectedGenreId] = useState<number | null>(null)
+  const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>([])
   const [lobbyError, setLobbyError] = useState<string | null>(null)
+  const [showHelp, setShowHelp] = useState(false)
 
   const [movies, setMovies] = useState<Movie[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -159,6 +202,8 @@ function App() {
     if (stored) {
       setSession(stored)
       setRoomInput(stored.roomCode)
+      setSelectedGenreId(stored.genreId)
+      setSelectedProviderIds(stored.providerIds)
     }
   }, [])
 
@@ -186,7 +231,12 @@ function App() {
     }
     setMoviesError(null)
 
-    fetchTopRatedMovies(apiKey, pageToLoad)
+    fetchDiscoverMovies(
+      apiKey,
+      pageToLoad,
+      session?.genreId ?? null,
+      session?.providerIds ?? [],
+    )
       .then((results) => {
         const filtered = results.filter((movie) => movie.poster_path)
         setMovies((prev) => (replace ? filtered : [...prev, ...filtered]))
@@ -461,6 +511,13 @@ function App() {
       ].filter((group) => group.items.length > 0)
     : []
 
+  const activeProviderLabels = (session?.providerIds ?? [])
+    .map((id) => PROVIDER_OPTIONS.find((option) => option.id === id)?.label)
+    .filter((label): label is string => Boolean(label))
+  const activeGenreLabel =
+    GENRE_OPTIONS.find((option) => option.id === session?.genreId)?.label ??
+    'Any'
+
   const finalizeSwipe = (direction: SwipeDirection) => {
     if (!activeMovie || !session) {
       return
@@ -541,6 +598,8 @@ function App() {
     const nextSession = {
       roomCode: normalized,
       userId: draftUserId,
+      genreId: selectedGenreId,
+      providerIds: selectedProviderIds,
     }
 
     setRoomInput(normalized)
@@ -560,6 +619,8 @@ function App() {
     saveSession(null)
     setRoomInput('')
     setDraftUserId(createUserId())
+    setSelectedGenreId(null)
+    setSelectedProviderIds([])
     setMovies([])
     setCurrentIndex(0)
     setPage(0)
@@ -646,10 +707,28 @@ function App() {
             ? 'Swipe right when you both want to watch it.'
             : 'Join a room and start swiping.'}
         </p>
+        {!session ? (
+          <button
+            type="button"
+            className="help-button"
+            onClick={() => setShowHelp(true)}
+            aria-label="How Movie Matcher works"
+          >
+            ?
+          </button>
+        ) : null}
         {session ? (
           <div className="room-meta">
             <span className="room-pill">Room {session.roomCode}</span>
             <span className="room-pill">User {session.userId}</span>
+            {session.genreId ? (
+              <span className="room-pill">Genre {activeGenreLabel}</span>
+            ) : null}
+            {activeProviderLabels.length > 0 ? (
+              <span className="room-pill">
+                Services {activeProviderLabels.join(', ')}
+              </span>
+            ) : null}
             <button type="button" className="link-button" onClick={handleLeave}>
               Change room
             </button>
@@ -673,6 +752,51 @@ function App() {
               autoComplete="off"
               inputMode="text"
             />
+            <label htmlFor="genreSelect">Genre</label>
+            <select
+              id="genreSelect"
+              value={selectedGenreId === null ? '' : String(selectedGenreId)}
+              onChange={(event) => {
+                const value = event.target.value
+                setSelectedGenreId(value ? Number(value) : null)
+              }}
+            >
+              {GENRE_OPTIONS.map((option) => (
+                <option
+                  key={option.id === null ? 'any' : option.id}
+                  value={option.id ?? ''}
+                >
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <label>Streaming services</label>
+            <div className="service-grid">
+              <label className="service-option">
+                <input
+                  type="checkbox"
+                  checked={selectedProviderIds.length === 0}
+                  onChange={() => setSelectedProviderIds([])}
+                />
+                <span>Any service</span>
+              </label>
+              {PROVIDER_OPTIONS.map((provider) => (
+                <label className="service-option" key={provider.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedProviderIds.includes(provider.id)}
+                    onChange={() => {
+                      setSelectedProviderIds((prev) =>
+                        prev.includes(provider.id)
+                          ? prev.filter((id) => id !== provider.id)
+                          : [...prev, provider.id],
+                      )
+                    }}
+                  />
+                  <span>{provider.label}</span>
+                </label>
+              ))}
+            </div>
             {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
             <button type="submit" className="button primary">
               Join room
@@ -933,7 +1057,8 @@ function App() {
                   className="button secondary"
                   href={youtubeUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
+                  onClick={openExternal(youtubeUrl)}
                 >
                   Watch trailer
                 </a>
@@ -943,7 +1068,8 @@ function App() {
                   className="button secondary"
                   href={imdbUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
+                  onClick={openExternal(imdbUrl)}
                 >
                   IMDb
                 </a>
@@ -953,7 +1079,8 @@ function App() {
                   className="button secondary"
                   href={homepageUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
+                  onClick={openExternal(homepageUrl)}
                 >
                   Official site
                 </a>
@@ -963,7 +1090,8 @@ function App() {
                   className="button secondary"
                   href={tmdbWatchUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
+                  onClick={openExternal(tmdbWatchUrl)}
                 >
                   TMDB watch
                 </a>
@@ -1066,6 +1194,64 @@ function App() {
               onClick={() => setExpandedMovieId(null)}
             >
               Back to swiping
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {showHelp ? (
+        <div className="help-sheet" role="dialog" aria-modal="true">
+          <div className="help-card">
+            <div className="help-header">
+              <h2>How Movie Matcher works</h2>
+              <button
+                type="button"
+                className="details-close"
+                onClick={() => setShowHelp(false)}
+                aria-label="Close help"
+              >
+                Close
+              </button>
+            </div>
+            <p>
+              Movie Matcher helps your group agree on what to watch by swiping
+              through a shared deck. When everyone in the room likes the same
+              movie, it shows up as a match.
+            </p>
+            <div className="help-section">
+              <h3>Room code</h3>
+              <p>
+                Share the same room code with your friends so you all swipe on
+                the same list.
+              </p>
+            </div>
+            <div className="help-section">
+              <h3>Genre + streaming filters</h3>
+              <p>
+                Pick a genre and streaming services to focus the deck. Choose
+                “Any” to keep it wide open.
+              </p>
+            </div>
+            <div className="help-section">
+              <h3>User id</h3>
+              <p>
+                Each device gets a user id so the room knows your swipes. Tap
+                “New id” if you want to reset it.
+              </p>
+            </div>
+            <div className="help-section">
+              <h3>Add to Home Screen (iPhone)</h3>
+              <p>
+                Open the share menu in Safari and tap “Add to Home Screen” to
+                install the app for quick access.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => setShowHelp(false)}
+            >
+              Got it
             </button>
           </div>
         </div>

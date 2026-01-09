@@ -47,6 +47,7 @@ export type WatchProviderRegion = {
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3'
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500'
 const TMDB_LOGO_BASE = 'https://image.tmdb.org/t/p/w92'
+const TMDB_WATCH_REGION = 'US'
 
 export const getPosterUrl = (path: string | null) => {
   if (!path) {
@@ -66,9 +67,11 @@ export const getProviderLogoUrl = (path: string | null) => {
 
 const MIN_VOTE_COUNT = 1000
 
-export const fetchTopRatedMovies = async (
+export const fetchDiscoverMovies = async (
   apiKey: string,
   page = 1,
+  genreId?: number | null,
+  providerIds: number[] = [],
   minVoteCount = MIN_VOTE_COUNT,
 ): Promise<Movie[]> => {
   const url = new URL(`${TMDB_BASE_URL}/discover/movie`)
@@ -78,6 +81,14 @@ export const fetchTopRatedMovies = async (
   url.searchParams.set('language', 'en-US')
   url.searchParams.set('sort_by', 'vote_average.desc')
   url.searchParams.set('vote_count.gte', String(minVoteCount))
+  if (genreId) {
+    url.searchParams.set('with_genres', String(genreId))
+  }
+  if (providerIds.length > 0) {
+    url.searchParams.set('watch_region', TMDB_WATCH_REGION)
+    url.searchParams.set('with_watch_monetization_types', 'flatrate')
+    url.searchParams.set('with_watch_providers', providerIds.join('|'))
+  }
   url.searchParams.set('page', String(page))
 
   const response = await fetch(url)
