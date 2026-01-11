@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM node:20-alpine AS builder
 WORKDIR /app
+ARG VITE_TMDB_API_KEY
+ENV VITE_TMDB_API_KEY=$VITE_TMDB_API_KEY
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
