@@ -70,7 +70,7 @@ const MIN_VOTE_COUNT = 250
 export const fetchDiscoverMovies = async (
   apiKey: string,
   page = 1,
-  genreId?: number | null,
+  genreIds: number[] = [],
   providerIds: number[] = [],
   minVoteCount = MIN_VOTE_COUNT,
 ): Promise<Movie[]> => {
@@ -81,8 +81,8 @@ export const fetchDiscoverMovies = async (
   url.searchParams.set('language', 'en-US')
   url.searchParams.set('sort_by', 'vote_average.desc')
   url.searchParams.set('vote_count.gte', String(minVoteCount))
-  if (genreId) {
-    url.searchParams.set('with_genres', String(genreId))
+  if (genreIds.length > 0) {
+    url.searchParams.set('with_genres', genreIds.join('|'))
   }
   if (providerIds.length > 0) {
     url.searchParams.set('watch_region', TMDB_WATCH_REGION)

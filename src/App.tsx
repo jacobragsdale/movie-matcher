@@ -8,7 +8,7 @@ import {
   type PointerEvent,
 } from 'react'
 import './App.css'
-import { fetchMatches, sendSwipe } from './api'
+import { createRoom, fetchMatches, fetchRoom, sendSwipe } from './api'
 import {
   fetchDiscoverMovies,
   fetchMovieDetails,
@@ -23,11 +23,12 @@ import {
 } from './tmdb'
 
 type SwipeDirection = 'left' | 'right'
+type LobbyMode = 'initial' | 'create' | 'join'
 
 type Session = {
   roomCode: string
   userId: string
-  genreId: number | null
+  genreIds: number[]
   providerIds: number[]
 }
 
@@ -47,14 +48,13 @@ const PREFETCH_THRESHOLD = 6
 const MAX_TMDB_PAGE = 500
 
 const GENRE_OPTIONS = [
-  { id: null, label: 'Any' },
   { id: 28, label: 'Action' },
   { id: 35, label: 'Comedy' },
   { id: 18, label: 'Drama' },
   { id: 53, label: 'Thriller' },
   { id: 27, label: 'Horror' },
   { id: 10749, label: 'Romance' },
-  { id: 878, label: 'Science Fiction' },
+  { id: 878, label: 'Sci-Fi' },
   { id: 12, label: 'Adventure' },
   { id: 16, label: 'Animation' },
   { id: 99, label: 'Documentary' },
@@ -72,6 +72,15 @@ const PROVIDER_OPTIONS = [
 
 const normalizeRoomCode = (value: string) =>
   value.replace(/\s+/g, '').toUpperCase()
+
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  for (let i = 0; i < 4; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)]
+  }
+  return code
+}
 
 const createUserId = () => {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -93,7 +102,9 @@ const loadSession = (): Session | null => {
       return {
         roomCode: parsed.roomCode,
         userId: parsed.userId,
-        genreId: typeof parsed.genreId === 'number' ? parsed.genreId : null,
+        genreIds: Array.isArray(parsed.genreIds)
+          ? parsed.genreIds.filter((id): id is number => typeof id === 'number')
+          : [],
         providerIds: Array.isArray(parsed.providerIds)
           ? parsed.providerIds.filter((id): id is number => typeof id === 'number')
           : [],
@@ -156,11 +167,15 @@ const formatDate = (date?: string) => {
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
+  const [lobbyMode, setLobbyMode] = useState<LobbyMode>('initial')
   const [roomInput, setRoomInput] = useState('')
+  const [generatedCode, setGeneratedCode] = useState('')
   const [draftUserId, setDraftUserId] = useState(() => createUserId())
-  const [selectedGenreId, setSelectedGenreId] = useState<number | null>(null)
+  const [selectedGenreIds, setSelectedGenreIds] = useState<number[]>([])
   const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>([])
   const [lobbyError, setLobbyError] = useState<string | null>(null)
+  const [isJoining, setIsJoining] = useState(false)
+  const [urlCopied, setUrlCopied] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
 
   const [movies, setMovies] = useState<Movie[]>([])
@@ -202,8 +217,24 @@ function App() {
     if (stored) {
       setSession(stored)
       setRoomInput(stored.roomCode)
-      setSelectedGenreId(stored.genreId)
+      setSelectedGenreIds(stored.genreIds)
       setSelectedProviderIds(stored.providerIds)
+      return
+    }
+
+    // Check for room code in URL
+    const params = new URLSearchParams(window.location.search)
+    const roomParam = params.get('room')
+    if (roomParam) {
+      const code = normalizeRoomCode(roomParam)
+      if (code) {
+        setRoomInput(code)
+        setLobbyMode('join')
+        // Clear the URL parameter
+        const url = new URL(window.location.href)
+        url.searchParams.delete('room')
+        window.history.replaceState({}, '', url.toString())
+      }
     }
   }, [])
 
@@ -234,7 +265,7 @@ function App() {
     fetchDiscoverMovies(
       apiKey,
       pageToLoad,
-      session?.genreId ?? null,
+      session?.genreIds ?? [],
       session?.providerIds ?? [],
     )
       .then((results) => {
@@ -514,9 +545,26 @@ function App() {
   const activeProviderLabels = (session?.providerIds ?? [])
     .map((id) => PROVIDER_OPTIONS.find((option) => option.id === id)?.label)
     .filter((label): label is string => Boolean(label))
-  const activeGenreLabel =
-    GENRE_OPTIONS.find((option) => option.id === session?.genreId)?.label ??
-    'Any'
+  const activeGenreLabels = (session?.genreIds ?? [])
+    .map((id) => GENRE_OPTIONS.find((option) => option.id === id)?.label)
+    .filter((label): label is string => Boolean(label))
+
+  const checkForNewMatches = async (roomCode: string) => {
+    try {
+      const ids = await fetchMatches(roomCode)
+      setMatches((prev) => {
+        const next = Array.from(new Set(ids))
+        const added = next.filter((id) => !prev.includes(id))
+        if (added.length > 0) {
+          setNewMatches(added)
+          setShowMatchNotice(true)
+        }
+        return next
+      })
+    } catch {
+      // Silently fail - polling will catch it
+    }
+  }
 
   const finalizeSwipe = (direction: SwipeDirection) => {
     if (!activeMovie || !session) {
@@ -528,14 +576,16 @@ function App() {
 
     if (direction === 'right') {
       setSwipeError(null)
-      void sendSwipe({
+      sendSwipe({
         roomCode: session.roomCode,
         userId: session.userId,
         movieId: card.id,
         direction,
-      }).catch(() => {
-        setSwipeError('Unable to reach the server for your swipe.')
       })
+        .then(() => checkForNewMatches(session.roomCode))
+        .catch(() => {
+          setSwipeError('Unable to reach the server for your swipe.')
+        })
     }
 
     window.setTimeout(() => {
@@ -587,39 +637,120 @@ function App() {
     pointerIdRef.current = null
   }
 
-  const handleJoin = (event: FormEvent<HTMLFormElement>) => {
+  const getShareableUrl = (roomCode: string) => {
+    const url = new URL(window.location.href)
+    url.search = ''
+    url.hash = ''
+    url.searchParams.set('room', roomCode)
+    return url.toString()
+  }
+
+  const handleCopyUrl = async () => {
+    if (!generatedCode) return
+    try {
+      await navigator.clipboard.writeText(getShareableUrl(generatedCode))
+      setUrlCopied(true)
+      setTimeout(() => setUrlCopied(false), 2000)
+    } catch {
+      // Fallback for older browsers
+      const url = getShareableUrl(generatedCode)
+      const input = document.createElement('input')
+      input.value = url
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+      setUrlCopied(true)
+      setTimeout(() => setUrlCopied(false), 2000)
+    }
+  }
+
+  const handleCreateRoom = () => {
+    const code = generateRoomCode()
+    setGeneratedCode(code)
+    setLobbyMode('create')
+    setLobbyError(null)
+    setUrlCopied(false)
+  }
+
+  const handleJoinMode = () => {
+    setLobbyMode('join')
+    setLobbyError(null)
+  }
+
+  const handleBackToInitial = () => {
+    setLobbyMode('initial')
+    setRoomInput('')
+    setGeneratedCode('')
+    setLobbyError(null)
+  }
+
+  const handleStartSession = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const normalized = normalizeRoomCode(roomInput)
-    if (!normalized) {
+
+    const code = lobbyMode === 'create' ? generatedCode : normalizeRoomCode(roomInput)
+    if (!code) {
       setLobbyError('Enter a room code to continue.')
       return
     }
 
-    const nextSession = {
-      roomCode: normalized,
-      userId: draftUserId,
-      genreId: selectedGenreId,
-      providerIds: selectedProviderIds,
-    }
-
-    setRoomInput(normalized)
-    setSession(nextSession)
-    saveSession(nextSession)
+    setIsJoining(true)
     setLobbyError(null)
-    setMatches([])
-    setNewMatches([])
-    setShowMatchNotice(false)
-    setPollError(null)
-    setSwipeError(null)
-    setExpandedMovieId(null)
+
+    try {
+      let genreIds = selectedGenreIds
+      let providerIds = selectedProviderIds
+
+      if (lobbyMode === 'create') {
+        await createRoom({
+          roomCode: code,
+          genreIds: selectedGenreIds,
+          providerIds: selectedProviderIds,
+        })
+      } else {
+        const room = await fetchRoom(code)
+        if (!room) {
+          setLobbyError('Room not found. Check the code and try again.')
+          setIsJoining(false)
+          return
+        }
+        genreIds = room.genreIds
+        providerIds = room.providerIds
+      }
+
+      const nextSession = {
+        roomCode: code,
+        userId: draftUserId,
+        genreIds,
+        providerIds,
+      }
+
+      setRoomInput(code)
+      setSession(nextSession)
+      saveSession(nextSession)
+      setLobbyMode('initial')
+      setMatches([])
+      setNewMatches([])
+      setShowMatchNotice(false)
+      setPollError(null)
+      setSwipeError(null)
+      setExpandedMovieId(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Something went wrong'
+      setLobbyError(message)
+    } finally {
+      setIsJoining(false)
+    }
   }
 
   const handleReset = () => {
     setSession(null)
     saveSession(null)
+    setLobbyMode('initial')
     setRoomInput('')
+    setGeneratedCode('')
     setDraftUserId(createUserId())
-    setSelectedGenreId(null)
+    setSelectedGenreIds([])
     setSelectedProviderIds([])
     setMovies([])
     setCurrentIndex(0)
@@ -682,7 +813,12 @@ function App() {
     const poster = movie ? getPosterUrl(movie.poster_path) : null
 
     return (
-      <div className="match-item" key={`match-${id}`}>
+      <button
+        type="button"
+        className="match-item"
+        key={`match-${id}`}
+        onClick={() => setExpandedMovieId(id)}
+      >
         {poster ? (
           <img className="match-thumb" src={poster} alt={movie?.title ?? ''} />
         ) : (
@@ -694,7 +830,7 @@ function App() {
             <span className="match-sub">{movie.release_date.slice(0, 4)}</span>
           ) : null}
         </div>
-      </div>
+      </button>
     )
   }
 
@@ -721,12 +857,14 @@ function App() {
         {session ? (
           <div className="room-meta">
             <span className="room-pill">Room {session.roomCode}</span>
-            {session.genreId ? (
-              <span className="room-pill">Genre {activeGenreLabel}</span>
+            {activeGenreLabels.length > 0 ? (
+              <span className="room-pill">
+                {activeGenreLabels.join(', ')}
+              </span>
             ) : null}
             {activeProviderLabels.length > 0 ? (
               <span className="room-pill">
-                Services {activeProviderLabels.join(', ')}
+                {activeProviderLabels.join(', ')}
               </span>
             ) : null}
             <button type="button" className="link-button" onClick={handleReset}>
@@ -738,85 +876,153 @@ function App() {
 
       {!session ? (
         <main className="lobby">
-          <form className="lobby-card" onSubmit={handleJoin}>
-            <label htmlFor="roomCode">Room code</label>
-            <input
-              id="roomCode"
-              type="text"
-              value={roomInput}
-              onChange={(event) => {
-                setRoomInput(event.target.value.toUpperCase())
-                setLobbyError(null)
-              }}
-              placeholder="Enter code"
-              autoComplete="off"
-              inputMode="text"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  event.currentTarget.blur()
-                }
-              }}
-            />
-            <label htmlFor="genreSelect">Genre</label>
-            <select
-              id="genreSelect"
-              value={selectedGenreId === null ? '' : String(selectedGenreId)}
-              onChange={(event) => {
-                const value = event.target.value
-                setSelectedGenreId(value ? Number(value) : null)
-              }}
-            >
-              {GENRE_OPTIONS.map((option) => (
-                <option
-                  key={option.id === null ? 'any' : option.id}
-                  value={option.id ?? ''}
-                >
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <label>Streaming services</label>
-            <div className="service-grid">
-              <label className="service-option">
-                <input
-                  type="checkbox"
-                  checked={selectedProviderIds.length === 0}
-                  onChange={() => setSelectedProviderIds([])}
-                />
-                <span>Any service</span>
-              </label>
-              {PROVIDER_OPTIONS.map((provider) => (
-                <label className="service-option" key={provider.id}>
-                  <input
-                    type="checkbox"
-                    checked={selectedProviderIds.includes(provider.id)}
-                    onChange={() => {
-                      setSelectedProviderIds((prev) =>
-                        prev.includes(provider.id)
-                          ? prev.filter((id) => id !== provider.id)
-                          : [...prev, provider.id],
-                      )
-                    }}
-                  />
-                  <span>{provider.label}</span>
-                </label>
-              ))}
-            </div>
-            {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
-            <div className="form-actions">
-              <button type="submit" className="button primary">
-                Join room
+          {lobbyMode === 'initial' ? (
+            <div className="lobby-options">
+              <button
+                type="button"
+                className="lobby-option"
+                onClick={handleCreateRoom}
+              >
+                <span className="lobby-option-title">Create a Room</span>
+                <span className="lobby-option-desc">
+                  Start a new session and invite others
+                </span>
               </button>
               <button
                 type="button"
-                className="button secondary"
-                onClick={handleReset}
+                className="lobby-option"
+                onClick={handleJoinMode}
               >
-                Reset
+                <span className="lobby-option-title">Join a Room</span>
+                <span className="lobby-option-desc">
+                  Enter a code someone shared with you
+                </span>
               </button>
             </div>
-          </form>
+          ) : (
+            <form className="lobby-card" onSubmit={handleStartSession}>
+              <button
+                type="button"
+                className="lobby-back"
+                onClick={handleBackToInitial}
+              >
+                Back
+              </button>
+
+              {lobbyMode === 'create' ? (
+                <>
+                  <div className="lobby-code-display">
+                    <span className="lobby-code-label">Your room code</span>
+                    <span className="lobby-code-value">{generatedCode}</span>
+                    <button
+                      type="button"
+                      className="lobby-copy-button"
+                      onClick={handleCopyUrl}
+                    >
+                      {urlCopied ? 'Copied!' : 'Copy invite link'}
+                    </button>
+                  </div>
+
+                  <div className="lobby-filters">
+                    <span className="lobby-filters-label">Filters (optional)</span>
+                    <label>Streaming services</label>
+                    <div className="filter-grid">
+                      <label className="filter-option">
+                        <input
+                          type="checkbox"
+                          checked={selectedProviderIds.length === 0}
+                          onChange={() => setSelectedProviderIds([])}
+                        />
+                        <span>Any service</span>
+                      </label>
+                      {PROVIDER_OPTIONS.map((provider) => (
+                        <label className="filter-option" key={provider.id}>
+                          <input
+                            type="checkbox"
+                            checked={selectedProviderIds.includes(provider.id)}
+                            onChange={() => {
+                              setSelectedProviderIds((prev) =>
+                                prev.includes(provider.id)
+                                  ? prev.filter((id) => id !== provider.id)
+                                  : [...prev, provider.id],
+                              )
+                            }}
+                          />
+                          <span>{provider.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <label>Genres</label>
+                    <div className="filter-grid">
+                      <label className="filter-option">
+                        <input
+                          type="checkbox"
+                          checked={selectedGenreIds.length === 0}
+                          onChange={() => setSelectedGenreIds([])}
+                        />
+                        <span>Any genre</span>
+                      </label>
+                      {GENRE_OPTIONS.map((genre) => (
+                        <label className="filter-option" key={genre.id}>
+                          <input
+                            type="checkbox"
+                            checked={selectedGenreIds.includes(genre.id)}
+                            onChange={() => {
+                              setSelectedGenreIds((prev) =>
+                                prev.includes(genre.id)
+                                  ? prev.filter((id) => id !== genre.id)
+                                  : [...prev, genre.id],
+                              )
+                            }}
+                          />
+                          <span>{genre.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="lobby-join-input">
+                  <label htmlFor="roomCode">Room code</label>
+                  <input
+                    id="roomCode"
+                    type="text"
+                    value={roomInput}
+                    onChange={(event) => {
+                      setRoomInput(event.target.value.toUpperCase())
+                      setLobbyError(null)
+                    }}
+                    placeholder="e.g. ABCD"
+                    autoComplete="off"
+                    inputMode="text"
+                    maxLength={4}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        event.currentTarget.blur()
+                      }
+                    }}
+                  />
+                  <span className="lobby-join-hint">
+                    Enter the code shared by the room creator
+                  </span>
+                </div>
+              )}
+
+              {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
+              <button
+                type="submit"
+                className="button primary lobby-submit"
+                disabled={isJoining}
+              >
+                {isJoining
+                  ? 'Loading...'
+                  : lobbyMode === 'create'
+                    ? 'Start swiping'
+                    : 'Join room'}
+              </button>
+            </form>
+          )}
         </main>
       ) : (
         <main className="swiper">

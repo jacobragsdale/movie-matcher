@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
 from typing import Iterable, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -48,6 +49,19 @@ class SwipeRequest(BaseModel):
   direction: Literal['left', 'right']
 
 
+class CreateRoomRequest(BaseModel):
+  room_code: str
+  genre_ids: list[int] = []
+  provider_ids: list[int] = []
+
+
+class RoomResponse(BaseModel):
+  room_code: str
+  genre_ids: list[int]
+  provider_ids: list[int]
+  created_at: str
+
+
 def get_connection() -> sqlite3.Connection:
   DB_PATH.parent.mkdir(parents=True, exist_ok=True)
   connection = sqlite3.connect(DB_PATH)
@@ -57,6 +71,16 @@ def get_connection() -> sqlite3.Connection:
 
 def init_db() -> None:
   with get_connection() as connection:
+    connection.execute(
+      """
+      CREATE TABLE IF NOT EXISTS rooms (
+        room_code TEXT PRIMARY KEY,
+        genre_ids TEXT NOT NULL DEFAULT '[]',
+        provider_ids TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+      """
+    )
     connection.execute(
       """
       CREATE TABLE IF NOT EXISTS swipes (
@@ -128,6 +152,56 @@ def get_matches(room_code: str) -> dict[str, list[int]]:
 @app.get('/api/health')
 def health() -> dict[str, str]:
   return {'status': 'ok'}
+
+
+@app.post('/api/rooms')
+def create_room(payload: CreateRoomRequest) -> RoomResponse:
+  with get_connection() as connection:
+    try:
+      connection.execute(
+        """
+        INSERT INTO rooms (room_code, genre_ids, provider_ids)
+        VALUES (?, ?, ?)
+        """,
+        (
+          payload.room_code,
+          json.dumps(payload.genre_ids),
+          json.dumps(payload.provider_ids),
+        ),
+      )
+    except sqlite3.IntegrityError:
+      raise HTTPException(status_code=409, detail='Room already exists')
+
+    row = connection.execute(
+      'SELECT * FROM rooms WHERE room_code = ?',
+      (payload.room_code,),
+    ).fetchone()
+
+  return RoomResponse(
+    room_code=row['room_code'],
+    genre_ids=json.loads(row['genre_ids']),
+    provider_ids=json.loads(row['provider_ids']),
+    created_at=row['created_at'],
+  )
+
+
+@app.get('/api/rooms/{room_code}')
+def get_room(room_code: str) -> RoomResponse:
+  with get_connection() as connection:
+    row = connection.execute(
+      'SELECT * FROM rooms WHERE room_code = ?',
+      (room_code,),
+    ).fetchone()
+
+  if not row:
+    raise HTTPException(status_code=404, detail='Room not found')
+
+  return RoomResponse(
+    room_code=row['room_code'],
+    genre_ids=json.loads(row['genre_ids']),
+    provider_ids=json.loads(row['provider_ids']),
+    created_at=row['created_at'],
+  )
 
 
 def resolve_static_dir() -> Path | None:
