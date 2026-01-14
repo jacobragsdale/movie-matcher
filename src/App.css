@@ -193,6 +193,34 @@
   transform: translateY(1px);
 }
 
+.lobby-copy-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.lobby-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 20px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.lobby-loading-text {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.lobby-share-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
 .lobby-filters {
   display: flex;
   flex-direction: column;
