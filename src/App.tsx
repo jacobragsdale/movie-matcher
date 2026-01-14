@@ -8,7 +8,7 @@ import {
   type PointerEvent,
 } from 'react'
 import './App.css'
-import { createRoom, fetchMatches, fetchRoom, sendSwipe } from './api'
+import { createRoom, fetchMatches, fetchRoom, fetchUserSwipes, sendSwipe } from './api'
 import {
   fetchDiscoverMovies,
   fetchMovieDetails,
@@ -23,7 +23,7 @@ import {
 } from './tmdb'
 
 type SwipeDirection = 'left' | 'right'
-type LobbyMode = 'initial' | 'create' | 'join'
+type LobbyMode = 'initial' | 'create' | 'share' | 'join'
 
 type Session = {
   roomCode: string
@@ -185,6 +185,7 @@ function App() {
   const [moviesError, setMoviesError] = useState<string | null>(null)
   const [page, setPage] = useState(0)
   const [hasMore, setHasMore] = useState(true)
+  const [swipedMovieIds, setSwipedMovieIds] = useState<Set<number>>(new Set())
 
   const [matches, setMatches] = useState<number[]>([])
   const [newMatches, setNewMatches] = useState<number[]>([])
@@ -219,26 +220,65 @@ function App() {
       setRoomInput(stored.roomCode)
       setSelectedGenreIds(stored.genreIds)
       setSelectedProviderIds(stored.providerIds)
+      // Update URL to include room code
+      const url = new URL(window.location.href)
+      url.searchParams.set('room', stored.roomCode)
+      window.history.replaceState({}, '', url.toString())
       return
     }
 
-    // Check for room code in URL
+    // Check for room code in URL and auto-join
     const params = new URLSearchParams(window.location.search)
     const roomParam = params.get('room')
     if (roomParam) {
       const code = normalizeRoomCode(roomParam)
       if (code) {
-        setRoomInput(code)
-        setLobbyMode('join')
-        // Clear the URL parameter
-        const url = new URL(window.location.href)
-        url.searchParams.delete('room')
-        window.history.replaceState({}, '', url.toString())
+        // Auto-join the room (keep room param in URL)
+        setIsJoining(true)
+        fetchRoom(code)
+          .then((room) => {
+            if (!room) {
+              setLobbyError('Room not found. It may have expired.')
+              setRoomInput(code)
+              setLobbyMode('join')
+              // Clear invalid room from URL
+              const url = new URL(window.location.href)
+              url.searchParams.delete('room')
+              window.history.replaceState({}, '', url.toString())
+              return
+            }
+
+            const nextSession = {
+              roomCode: code,
+              userId: draftUserId,
+              genreIds: room.genreIds,
+              providerIds: room.providerIds,
+            }
+            setSession(nextSession)
+            saveSession(nextSession)
+            // URL already has room param, no need to update
+          })
+          .catch(() => {
+            setLobbyError('Could not join room. Please try again.')
+            setRoomInput(code)
+            setLobbyMode('join')
+            // Clear invalid room from URL
+            const url = new URL(window.location.href)
+            url.searchParams.delete('room')
+            window.history.replaceState({}, '', url.toString())
+          })
+          .finally(() => {
+            setIsJoining(false)
+          })
       }
     }
   }, [])
 
-  const loadMovies = (pageToLoad: number, replace: boolean) => {
+  const loadMovies = (
+    pageToLoad: number,
+    replace: boolean,
+    excludeIds: Set<number> = new Set(),
+  ) => {
     if (!apiKey) {
       setMoviesError('Add VITE_TMDB_API_KEY to your environment to load movies.')
       setIsLoadingMovies(false)
@@ -269,7 +309,9 @@ function App() {
       session?.providerIds ?? [],
     )
       .then((results) => {
-        const filtered = results.filter((movie) => movie.poster_path)
+        const filtered = results.filter(
+          (movie) => movie.poster_path && !excludeIds.has(movie.id),
+        )
         setMovies((prev) => (replace ? filtered : [...prev, ...filtered]))
         setPage(pageToLoad)
         if (results.length === 0 || pageToLoad >= MAX_TMDB_PAGE) {
@@ -294,12 +336,31 @@ function App() {
       return
     }
 
+    let isActive = true
     setMovies([])
     setCurrentIndex(0)
     setPage(0)
     setHasMore(true)
     setIsLoadingMore(false)
-    loadMovies(1, true)
+
+    // Fetch user's previous swipes, then load movies excluding those
+    fetchUserSwipes(session.roomCode, session.userId)
+      .then((swipedIds) => {
+        if (!isActive) return
+        const swipedSet = new Set(swipedIds)
+        setSwipedMovieIds(swipedSet)
+        loadMovies(1, true, swipedSet)
+      })
+      .catch(() => {
+        // If fetching swipes fails, load movies anyway without filtering
+        if (!isActive) return
+        setSwipedMovieIds(new Set())
+        loadMovies(1, true)
+      })
+
+    return () => {
+      isActive = false
+    }
   }, [session])
 
   useEffect(() => {
@@ -352,7 +413,7 @@ function App() {
     if (remaining <= PREFETCH_THRESHOLD) {
       const nextPage = page > 0 ? page + 1 : 1
       if (nextPage <= MAX_TMDB_PAGE) {
-        loadMovies(nextPage, false)
+        loadMovies(nextPage, false, swipedMovieIds)
       }
     }
   }, [
@@ -363,6 +424,7 @@ function App() {
     movies.length,
     currentIndex,
     page,
+    swipedMovieIds,
   ])
 
   useEffect(() => {
@@ -374,7 +436,7 @@ function App() {
     if (!hasActiveMovie && movies.length > 0) {
       const nextPage = page > 0 ? page + 1 : 1
       if (nextPage <= MAX_TMDB_PAGE) {
-        loadMovies(nextPage, false)
+        loadMovies(nextPage, false, swipedMovieIds)
       }
     }
   }, [
@@ -385,6 +447,7 @@ function App() {
     movies.length,
     currentIndex,
     page,
+    swipedMovieIds,
   ])
 
   useEffect(() => {
@@ -574,19 +637,25 @@ function App() {
     const card = activeMovie
     setSwipeDirection(direction)
 
-    if (direction === 'right') {
-      setSwipeError(null)
-      sendSwipe({
-        roomCode: session.roomCode,
-        userId: session.userId,
-        movieId: card.id,
-        direction,
+    // Track this movie as swiped locally
+    setSwipedMovieIds((prev) => new Set([...prev, card.id]))
+
+    // Send swipe to backend (both left and right)
+    setSwipeError(null)
+    sendSwipe({
+      roomCode: session.roomCode,
+      userId: session.userId,
+      movieId: card.id,
+      direction,
+    })
+      .then(() => {
+        if (direction === 'right') {
+          checkForNewMatches(session.roomCode)
+        }
       })
-        .then(() => checkForNewMatches(session.roomCode))
-        .catch(() => {
-          setSwipeError('Unable to reach the server for your swipe.')
-        })
-    }
+      .catch(() => {
+        setSwipeError('Unable to reach the server for your swipe.')
+      })
 
     window.setTimeout(() => {
       setCurrentIndex((prev) => prev + 1)
@@ -645,6 +714,18 @@ function App() {
     return url.toString()
   }
 
+  const updateUrlWithRoom = (roomCode: string) => {
+    const url = new URL(window.location.href)
+    url.searchParams.set('room', roomCode)
+    window.history.replaceState({}, '', url.toString())
+  }
+
+  const clearRoomFromUrl = () => {
+    const url = new URL(window.location.href)
+    url.searchParams.delete('room')
+    window.history.replaceState({}, '', url.toString())
+  }
+
   const handleCopyUrl = async () => {
     if (!generatedCode) return
     try {
@@ -665,12 +746,65 @@ function App() {
     }
   }
 
+  const [isCreatingRoom, setIsCreatingRoom] = useState(false)
+
   const handleCreateRoom = () => {
-    const code = generateRoomCode()
-    setGeneratedCode(code)
     setLobbyMode('create')
     setLobbyError(null)
-    setUrlCopied(false)
+  }
+
+  const handleSubmitCreateRoom = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setIsCreatingRoom(true)
+    setLobbyError(null)
+
+    const code = generateRoomCode()
+    setGeneratedCode(code)
+
+    try {
+      await createRoom({
+        roomCode: code,
+        genreIds: selectedGenreIds,
+        providerIds: selectedProviderIds,
+      })
+      setLobbyMode('share')
+    } catch {
+      // If room creation fails (e.g., code collision), generate a new code and retry
+      const newCode = generateRoomCode()
+      setGeneratedCode(newCode)
+      try {
+        await createRoom({
+          roomCode: newCode,
+          genreIds: selectedGenreIds,
+          providerIds: selectedProviderIds,
+        })
+        setLobbyMode('share')
+      } catch {
+        setLobbyError('Could not create room. Please try again.')
+      }
+    } finally {
+      setIsCreatingRoom(false)
+    }
+  }
+
+  const handleStartSwiping = () => {
+    const nextSession = {
+      roomCode: generatedCode,
+      userId: draftUserId,
+      genreIds: selectedGenreIds,
+      providerIds: selectedProviderIds,
+    }
+
+    setSession(nextSession)
+    saveSession(nextSession)
+    updateUrlWithRoom(generatedCode)
+    setLobbyMode('initial')
+    setMatches([])
+    setNewMatches([])
+    setShowMatchNotice(false)
+    setPollError(null)
+    setSwipeError(null)
+    setExpandedMovieId(null)
   }
 
   const handleJoinMode = () => {
@@ -683,6 +817,7 @@ function App() {
     setRoomInput('')
     setGeneratedCode('')
     setLobbyError(null)
+    setUrlCopied(false)
   }
 
   const handleStartSession = async (event: FormEvent<HTMLFormElement>) => {
@@ -694,40 +829,52 @@ function App() {
       return
     }
 
-    setIsJoining(true)
-    setLobbyError(null)
-
-    try {
-      let genreIds = selectedGenreIds
-      let providerIds = selectedProviderIds
-
-      if (lobbyMode === 'create') {
-        await createRoom({
-          roomCode: code,
-          genreIds: selectedGenreIds,
-          providerIds: selectedProviderIds,
-        })
-      } else {
-        const room = await fetchRoom(code)
-        if (!room) {
-          setLobbyError('Room not found. Check the code and try again.')
-          setIsJoining(false)
-          return
-        }
-        genreIds = room.genreIds
-        providerIds = room.providerIds
-      }
-
+    if (lobbyMode === 'create') {
+      // Room already created when clicking "Create a Room"
       const nextSession = {
         roomCode: code,
         userId: draftUserId,
-        genreIds,
-        providerIds,
+        genreIds: selectedGenreIds,
+        providerIds: selectedProviderIds,
       }
 
       setRoomInput(code)
       setSession(nextSession)
       saveSession(nextSession)
+      updateUrlWithRoom(code)
+      setLobbyMode('initial')
+      setMatches([])
+      setNewMatches([])
+      setShowMatchNotice(false)
+      setPollError(null)
+      setSwipeError(null)
+      setExpandedMovieId(null)
+      return
+    }
+
+    // Join mode - fetch room from server
+    setIsJoining(true)
+    setLobbyError(null)
+
+    try {
+      const room = await fetchRoom(code)
+      if (!room) {
+        setLobbyError('Room not found. Check the code and try again.')
+        setIsJoining(false)
+        return
+      }
+
+      const nextSession = {
+        roomCode: code,
+        userId: draftUserId,
+        genreIds: room.genreIds,
+        providerIds: room.providerIds,
+      }
+
+      setRoomInput(code)
+      setSession(nextSession)
+      saveSession(nextSession)
+      updateUrlWithRoom(code)
       setLobbyMode('initial')
       setMatches([])
       setNewMatches([])
@@ -746,9 +893,11 @@ function App() {
   const handleReset = () => {
     setSession(null)
     saveSession(null)
+    clearRoomFromUrl()
     setLobbyMode('initial')
     setRoomInput('')
     setGeneratedCode('')
+    setUrlCopied(false)
     setDraftUserId(createUserId())
     setSelectedGenreIds([])
     setSelectedProviderIds([])
@@ -758,6 +907,7 @@ function App() {
     setHasMore(true)
     setIsLoadingMovies(false)
     setIsLoadingMore(false)
+    setSwipedMovieIds(new Set())
     setMatches([])
     setNewMatches([])
     setShowMatchNotice(false)
@@ -778,7 +928,7 @@ function App() {
     setHasMore(true)
     setMoviesError(null)
     setIsLoadingMore(false)
-    loadMovies(1, true)
+    loadMovies(1, true, swipedMovieIds)
   }
 
   const actionLabel =
@@ -838,11 +988,17 @@ function App() {
     <div className="app">
       <header className="app-header">
         <p className="eyebrow">Movie Matcher</p>
-        <h1>{session ? 'Swipe together' : 'Find your movie match'}</h1>
+        <h1>{session ? 'Start swiping' : 'Find your movie match'}</h1>
         <p className="subhead">
           {session
-            ? 'Swipe right when you both want to watch it.'
-            : 'Create or join a room and start swiping.'}
+            ? 'Swipe right on movies you want to watch.'
+            : lobbyMode === 'create'
+              ? 'Choose what movies to include.'
+              : lobbyMode === 'share'
+                ? 'Invite others to join your room.'
+                : lobbyMode === 'join'
+                  ? 'Enter a code to join an existing room.'
+                  : 'Create or join a room and start swiping.'}
         </p>
         {!session ? (
           <button
@@ -876,7 +1032,11 @@ function App() {
 
       {!session ? (
         <main className="lobby">
-          {lobbyMode === 'initial' ? (
+          {isJoining && lobbyMode === 'initial' ? (
+            <div className="lobby-loading">
+              <span className="lobby-loading-text">Joining room...</span>
+            </div>
+          ) : lobbyMode === 'initial' ? (
             <div className="lobby-options">
               <button
                 type="button"
@@ -899,6 +1059,107 @@ function App() {
                 </span>
               </button>
             </div>
+          ) : lobbyMode === 'create' ? (
+            <form className="lobby-card" onSubmit={handleSubmitCreateRoom}>
+              <button
+                type="button"
+                className="lobby-back"
+                onClick={handleBackToInitial}
+              >
+                Back
+              </button>
+
+              <div className="lobby-filters">
+                <span className="lobby-filters-label">Filters (optional)</span>
+                <label>Streaming services</label>
+                <div className="filter-grid">
+                  <label className="filter-option">
+                    <input
+                      type="checkbox"
+                      checked={selectedProviderIds.length === 0}
+                      onChange={() => setSelectedProviderIds([])}
+                    />
+                    <span>Any service</span>
+                  </label>
+                  {PROVIDER_OPTIONS.map((provider) => (
+                    <label className="filter-option" key={provider.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedProviderIds.includes(provider.id)}
+                        onChange={() => {
+                          setSelectedProviderIds((prev) =>
+                            prev.includes(provider.id)
+                              ? prev.filter((id) => id !== provider.id)
+                              : [...prev, provider.id],
+                          )
+                        }}
+                      />
+                      <span>{provider.label}</span>
+                    </label>
+                  ))}
+                </div>
+                <label>Genres</label>
+                <div className="filter-grid">
+                  <label className="filter-option">
+                    <input
+                      type="checkbox"
+                      checked={selectedGenreIds.length === 0}
+                      onChange={() => setSelectedGenreIds([])}
+                    />
+                    <span>Any genre</span>
+                  </label>
+                  {GENRE_OPTIONS.map((genre) => (
+                    <label className="filter-option" key={genre.id}>
+                      <input
+                        type="checkbox"
+                        checked={selectedGenreIds.includes(genre.id)}
+                        onChange={() => {
+                          setSelectedGenreIds((prev) =>
+                            prev.includes(genre.id)
+                              ? prev.filter((id) => id !== genre.id)
+                              : [...prev, genre.id],
+                          )
+                        }}
+                      />
+                      <span>{genre.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
+              <button
+                type="submit"
+                className="button primary lobby-submit"
+                disabled={isCreatingRoom}
+              >
+                {isCreatingRoom ? 'Creating...' : 'Create Room'}
+              </button>
+            </form>
+          ) : lobbyMode === 'share' ? (
+            <div className="lobby-card">
+              <div className="lobby-code-display">
+                <span className="lobby-code-label">Your room code</span>
+                <span className="lobby-code-value">{generatedCode}</span>
+                <button
+                  type="button"
+                  className="lobby-copy-button"
+                  onClick={handleCopyUrl}
+                >
+                  {urlCopied ? 'Copied!' : 'Copy invite link'}
+                </button>
+              </div>
+
+              <div className="lobby-share-actions">
+                <button
+                  type="button"
+                  className="button primary lobby-submit"
+                  onClick={handleStartSwiping}
+                >
+                  Start swiping
+                </button>
+              </div>
+            </div>
           ) : (
             <form className="lobby-card" onSubmit={handleStartSession}>
               <button
@@ -909,105 +1170,31 @@ function App() {
                 Back
               </button>
 
-              {lobbyMode === 'create' ? (
-                <>
-                  <div className="lobby-code-display">
-                    <span className="lobby-code-label">Your room code</span>
-                    <span className="lobby-code-value">{generatedCode}</span>
-                    <button
-                      type="button"
-                      className="lobby-copy-button"
-                      onClick={handleCopyUrl}
-                    >
-                      {urlCopied ? 'Copied!' : 'Copy invite link'}
-                    </button>
-                  </div>
-
-                  <div className="lobby-filters">
-                    <span className="lobby-filters-label">Filters (optional)</span>
-                    <label>Streaming services</label>
-                    <div className="filter-grid">
-                      <label className="filter-option">
-                        <input
-                          type="checkbox"
-                          checked={selectedProviderIds.length === 0}
-                          onChange={() => setSelectedProviderIds([])}
-                        />
-                        <span>Any service</span>
-                      </label>
-                      {PROVIDER_OPTIONS.map((provider) => (
-                        <label className="filter-option" key={provider.id}>
-                          <input
-                            type="checkbox"
-                            checked={selectedProviderIds.includes(provider.id)}
-                            onChange={() => {
-                              setSelectedProviderIds((prev) =>
-                                prev.includes(provider.id)
-                                  ? prev.filter((id) => id !== provider.id)
-                                  : [...prev, provider.id],
-                              )
-                            }}
-                          />
-                          <span>{provider.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                    <label>Genres</label>
-                    <div className="filter-grid">
-                      <label className="filter-option">
-                        <input
-                          type="checkbox"
-                          checked={selectedGenreIds.length === 0}
-                          onChange={() => setSelectedGenreIds([])}
-                        />
-                        <span>Any genre</span>
-                      </label>
-                      {GENRE_OPTIONS.map((genre) => (
-                        <label className="filter-option" key={genre.id}>
-                          <input
-                            type="checkbox"
-                            checked={selectedGenreIds.includes(genre.id)}
-                            onChange={() => {
-                              setSelectedGenreIds((prev) =>
-                                prev.includes(genre.id)
-                                  ? prev.filter((id) => id !== genre.id)
-                                  : [...prev, genre.id],
-                              )
-                            }}
-                          />
-                          <span>{genre.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="lobby-join-input">
-                  <label htmlFor="roomCode">Room code</label>
-                  <input
-                    id="roomCode"
-                    type="text"
-                    value={roomInput}
-                    onChange={(event) => {
-                      setRoomInput(event.target.value.toUpperCase())
-                      setLobbyError(null)
-                    }}
-                    placeholder="e.g. ABCD"
-                    autoComplete="off"
-                    inputMode="text"
-                    maxLength={4}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        event.currentTarget.blur()
-                      }
-                    }}
-                  />
-                  <span className="lobby-join-hint">
-                    Enter the code shared by the room creator
-                  </span>
-                </div>
-              )}
+              <div className="lobby-join-input">
+                <label htmlFor="roomCode">Room code</label>
+                <input
+                  id="roomCode"
+                  type="text"
+                  value={roomInput}
+                  onChange={(event) => {
+                    setRoomInput(event.target.value.toUpperCase())
+                    setLobbyError(null)
+                  }}
+                  placeholder="e.g. ABCD"
+                  autoComplete="off"
+                  inputMode="text"
+                  maxLength={4}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      event.currentTarget.blur()
+                    }
+                  }}
+                />
+                <span className="lobby-join-hint">
+                  Enter the code shared by the room creator
+                </span>
+              </div>
 
               {lobbyError ? <p className="form-error">{lobbyError}</p> : null}
               <button
@@ -1015,11 +1202,7 @@ function App() {
                 className="button primary lobby-submit"
                 disabled={isJoining}
               >
-                {isJoining
-                  ? 'Loading...'
-                  : lobbyMode === 'create'
-                    ? 'Start swiping'
-                    : 'Join room'}
+                {isJoining ? 'Joining...' : 'Join room'}
               </button>
             </form>
           )}
@@ -1193,7 +1376,7 @@ function App() {
         <div className="match-notice" role="dialog" aria-live="assertive">
           <div className="match-notice-card">
             <h3>It&apos;s a match!</h3>
-            <p>Everyone in the room liked these titles.</p>
+            <p>Everyone in the room liked this title.</p>
             <div className="match-list">
               {newMatches.map(renderMatchItem)}
             </div>

@@ -154,6 +154,22 @@ def health() -> dict[str, str]:
   return {'status': 'ok'}
 
 
+@app.get('/api/swipes/{room_code}/{user_id}')
+def get_user_swipes(room_code: str, user_id: str) -> dict[str, list[int]]:
+  with get_connection() as connection:
+    rows = connection.execute(
+      """
+      SELECT movie_id
+      FROM swipes
+      WHERE room_code = ? AND user_id = ?
+      """,
+      (room_code, user_id),
+    ).fetchall()
+
+  swiped_movie_ids = [int(row['movie_id']) for row in rows]
+  return {'swiped_movie_ids': swiped_movie_ids}
+
+
 @app.post('/api/rooms')
 def create_room(payload: CreateRoomRequest) -> RoomResponse:
   with get_connection() as connection:

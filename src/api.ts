@@ -125,3 +125,21 @@ export const fetchRoom = async (roomCode: string): Promise<Room | null> => {
     createdAt: data.created_at,
   }
 }
+
+export const fetchUserSwipes = async (
+  roomCode: string,
+  userId: string,
+): Promise<number[]> => {
+  const response = await fetch(
+    buildApiUrl(
+      `/api/swipes/${encodeURIComponent(roomCode)}/${encodeURIComponent(userId)}`,
+    ),
+  )
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch user swipes')
+  }
+
+  const data = (await response.json()) as { swiped_movie_ids?: number[] }
+  return data.swiped_movie_ids ?? []
+}
