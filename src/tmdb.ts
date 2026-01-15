@@ -65,7 +65,7 @@ export const getProviderLogoUrl = (path: string | null) => {
   return `${TMDB_LOGO_BASE}${path}`
 }
 
-const MIN_VOTE_COUNT = 250
+const MIN_VOTE_COUNT = 100
 
 export const fetchDiscoverMovies = async (
   apiKey: string,
@@ -79,7 +79,7 @@ export const fetchDiscoverMovies = async (
   url.searchParams.set('include_adult', 'false')
   url.searchParams.set('include_video', 'false')
   url.searchParams.set('language', 'en-US')
-  url.searchParams.set('sort_by', 'vote_average.desc')
+  url.searchParams.set('sort_by', 'popularity.desc')
   url.searchParams.set('vote_count.gte', String(minVoteCount))
   if (genreIds.length > 0) {
     url.searchParams.set('with_genres', genreIds.join('|'))
@@ -98,6 +98,35 @@ export const fetchDiscoverMovies = async (
 
   const data = (await response.json()) as { results?: MovieResult[] }
   return data.results ?? []
+}
+
+const shuffleArray = <T,>(array: T[]): T[] => {
+  const shuffled = [...array]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  }
+  return shuffled
+}
+
+export const fetchShuffledMovies = async (
+  apiKey: string,
+  genreIds: number[] = [],
+  providerIds: number[] = [],
+  maxMovies = 100,
+  minVoteCount = MIN_VOTE_COUNT,
+): Promise<Movie[]> => {
+  const moviesPerPage = 20
+  const pagesToFetch = Math.ceil(maxMovies / moviesPerPage)
+  const allMovies: Movie[] = []
+
+  for (let page = 1; page <= pagesToFetch; page++) {
+    const movies = await fetchDiscoverMovies(apiKey, page, genreIds, providerIds, minVoteCount)
+    allMovies.push(...movies)
+    if (movies.length < moviesPerPage) break
+  }
+
+  return shuffleArray(allMovies.slice(0, maxMovies))
 }
 
 export const fetchMovieDetails = async (

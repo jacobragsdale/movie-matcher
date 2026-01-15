@@ -34,7 +34,7 @@ docker run -p 8000:8000 -v $(pwd)/data:/data movie-matcher
 - Movies fetched from TMDB's discover API, sorted by vote average (highest rated first)
 - Filters by genre (Action, Comedy, Drama, Thriller, Horror, Romance, Sci-Fi, Adventure, Animation, Documentary)
 - Filters by streaming provider (Netflix, Hulu, Prime Video, HBO Max, Paramount+, Disney+, Apple TV+)
-- Minimum 250 votes required (`MIN_VOTE_COUNT`) to ensure quality results
+- Minimum 100 votes required (`MIN_VOTE_COUNT`) to ensure quality results
 - Automatic pagination with prefetch when 6 or fewer movies remain (`PREFETCH_THRESHOLD`)
 
 ### Swiping Interface
@@ -240,7 +240,7 @@ const SWIPE_THRESHOLD = 110        // Pixels to drag before swipe registers
 const POLL_INTERVAL = 4000         // Match polling interval (ms)
 const PREFETCH_THRESHOLD = 6       // Load more when this many movies remain
 const MAX_TMDB_PAGE = 500          // TMDB API max page limit
-const MIN_VOTE_COUNT = 250         // Minimum votes for movie quality filter
+const MIN_VOTE_COUNT = 100         // Minimum votes for movie quality filter
 ```
 
 ## User Flow

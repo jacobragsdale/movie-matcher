@@ -8,9 +8,19 @@ import {
   type PointerEvent,
 } from 'react'
 import './App.css'
-import { createRoom, fetchMatches, fetchRoom, fetchUserSwipes, sendSwipe } from './api'
 import {
-  fetchDiscoverMovies,
+  createRoom,
+  fetchMatches,
+  fetchRoom,
+  fetchRoomUsers,
+  fetchUserSwipes,
+  joinRoom,
+  sendSwipe,
+  type MatchWithLikers,
+  type RoomUser,
+} from './api'
+import {
+  fetchShuffledMovies,
   fetchMovieDetails,
   fetchMovieVideos,
   fetchWatchProviders,
@@ -23,11 +33,12 @@ import {
 } from './tmdb'
 
 type SwipeDirection = 'left' | 'right'
-type LobbyMode = 'initial' | 'create' | 'share' | 'join'
+type LobbyMode = 'welcome' | 'initial' | 'create' | 'share' | 'join' | 'enter-username'
 
 type Session = {
   roomCode: string
   userId: string
+  username: string
   genreIds: number[]
   providerIds: number[]
 }
@@ -44,8 +55,8 @@ type DetailState = {
 const SWIPE_THRESHOLD = 110
 const POLL_INTERVAL = 4000
 const SESSION_STORAGE_KEY = 'movie-matcher-session'
-const PREFETCH_THRESHOLD = 6
-const MAX_TMDB_PAGE = 500
+const WELCOME_STORAGE_KEY = 'movie-matcher-welcomed'
+const USERNAME_STORAGE_KEY = 'movie-matcher-username'
 
 const GENRE_OPTIONS = [
   { id: 28, label: 'Action' },
@@ -82,39 +93,20 @@ const generateRoomCode = () => {
   return code
 }
 
-const createUserId = () => {
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-    return crypto.randomUUID().split('-')[0]
-  }
-
-  return Math.random().toString(36).slice(2, 8)
+const loadStoredUsername = (): string => {
+  return localStorage.getItem(USERNAME_STORAGE_KEY) ?? ''
 }
 
-const loadSession = (): Session | null => {
-  const stored = sessionStorage.getItem(SESSION_STORAGE_KEY)
-  if (!stored) {
-    return null
-  }
+const saveStoredUsername = (username: string) => {
+  localStorage.setItem(USERNAME_STORAGE_KEY, username)
+}
 
-  try {
-    const parsed = JSON.parse(stored) as Partial<Session>
-    if (parsed.roomCode && parsed.userId) {
-      return {
-        roomCode: parsed.roomCode,
-        userId: parsed.userId,
-        genreIds: Array.isArray(parsed.genreIds)
-          ? parsed.genreIds.filter((id): id is number => typeof id === 'number')
-          : [],
-        providerIds: Array.isArray(parsed.providerIds)
-          ? parsed.providerIds.filter((id): id is number => typeof id === 'number')
-          : [],
-      }
-    }
-  } catch {
-    return null
-  }
+const hasCompletedWelcome = (): boolean => {
+  return localStorage.getItem(WELCOME_STORAGE_KEY) === 'true'
+}
 
-  return null
+const markWelcomeCompleted = () => {
+  localStorage.setItem(WELCOME_STORAGE_KEY, 'true')
 }
 
 const saveSession = (session: Session | null) => {
@@ -167,10 +159,11 @@ const formatDate = (date?: string) => {
 
 function App() {
   const [session, setSession] = useState<Session | null>(null)
-  const [lobbyMode, setLobbyMode] = useState<LobbyMode>('initial')
+  const [lobbyMode, setLobbyMode] = useState<LobbyMode>(() =>
+    hasCompletedWelcome() ? 'initial' : 'welcome'
+  )
   const [roomInput, setRoomInput] = useState('')
   const [generatedCode, setGeneratedCode] = useState('')
-  const [draftUserId, setDraftUserId] = useState(() => createUserId())
   const [selectedGenreIds, setSelectedGenreIds] = useState<number[]>([])
   const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>([])
   const [lobbyError, setLobbyError] = useState<string | null>(null)
@@ -178,17 +171,19 @@ function App() {
   const [urlCopied, setUrlCopied] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
 
+  const [usernameInput, setUsernameInput] = useState(() => loadStoredUsername())
+  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(null)
+  const [roomUsers, setRoomUsers] = useState<RoomUser[]>([])
+
   const [movies, setMovies] = useState<Movie[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [isLoadingMovies, setIsLoadingMovies] = useState(false)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [moviesError, setMoviesError] = useState<string | null>(null)
-  const [page, setPage] = useState(0)
   const [hasMore, setHasMore] = useState(true)
   const [swipedMovieIds, setSwipedMovieIds] = useState<Set<number>>(new Set())
 
-  const [matches, setMatches] = useState<number[]>([])
-  const [newMatches, setNewMatches] = useState<number[]>([])
+  const [matches, setMatches] = useState<MatchWithLikers[]>([])
+  const [newMatches, setNewMatches] = useState<MatchWithLikers[]>([])
   const [showMatchNotice, setShowMatchNotice] = useState(false)
   const [pollError, setPollError] = useState<string | null>(null)
   const [swipeError, setSwipeError] = useState<string | null>(null)
@@ -214,26 +209,16 @@ function App() {
   const apiKey = import.meta.env.VITE_TMDB_API_KEY as string | undefined
 
   useEffect(() => {
-    const stored = loadSession()
-    if (stored) {
-      setSession(stored)
-      setRoomInput(stored.roomCode)
-      setSelectedGenreIds(stored.genreIds)
-      setSelectedProviderIds(stored.providerIds)
-      // Update URL to include room code
-      const url = new URL(window.location.href)
-      url.searchParams.set('room', stored.roomCode)
-      window.history.replaceState({}, '', url.toString())
-      return
-    }
+    // Clear session on page load so users are always prompted to enter a room
+    sessionStorage.removeItem(SESSION_STORAGE_KEY)
 
-    // Check for room code in URL and auto-join
+    // Check for room code in URL - prompt for username before joining
     const params = new URLSearchParams(window.location.search)
     const roomParam = params.get('room')
     if (roomParam) {
       const code = normalizeRoomCode(roomParam)
       if (code) {
-        // Auto-join the room (keep room param in URL)
+        // Validate room exists first
         setIsJoining(true)
         fetchRoom(code)
           .then((room) => {
@@ -248,15 +233,11 @@ function App() {
               return
             }
 
-            const nextSession = {
-              roomCode: code,
-              userId: draftUserId,
-              genreIds: room.genreIds,
-              providerIds: room.providerIds,
-            }
-            setSession(nextSession)
-            saveSession(nextSession)
-            // URL already has room param, no need to update
+            // Room exists, prompt for username
+            setPendingRoomCode(code)
+            setSelectedGenreIds(room.genreIds)
+            setSelectedProviderIds(room.providerIds)
+            setLobbyMode('enter-username')
           })
           .catch(() => {
             setLobbyError('Could not join room. Please try again.')
@@ -271,62 +252,47 @@ function App() {
             setIsJoining(false)
           })
       }
+    } else {
+      // No room in URL, show welcome screen for username entry
+      setLobbyMode('welcome')
     }
   }, [])
 
-  const loadMovies = (
-    pageToLoad: number,
-    replace: boolean,
-    excludeIds: Set<number> = new Set(),
-  ) => {
+  const loadMovies = (excludeIds: Set<number> = new Set()) => {
     if (!apiKey) {
       setMoviesError('Add VITE_TMDB_API_KEY to your environment to load movies.')
       setIsLoadingMovies(false)
-      setIsLoadingMore(false)
-      if (replace) {
-        setMovies([])
-      }
+      setMovies([])
       setHasMore(false)
       return
     }
 
-    if (loadingPageRef.current === pageToLoad) {
+    if (loadingPageRef.current !== null) {
       return
     }
 
-    loadingPageRef.current = pageToLoad
-    if (replace) {
-      setIsLoadingMovies(true)
-    } else {
-      setIsLoadingMore(true)
-    }
+    loadingPageRef.current = 1
+    setIsLoadingMovies(true)
     setMoviesError(null)
 
-    fetchDiscoverMovies(
+    fetchShuffledMovies(
       apiKey,
-      pageToLoad,
       session?.genreIds ?? [],
       session?.providerIds ?? [],
+      100,
     )
       .then((results) => {
         const filtered = results.filter(
           (movie) => movie.poster_path && !excludeIds.has(movie.id),
         )
-        setMovies((prev) => (replace ? filtered : [...prev, ...filtered]))
-        setPage(pageToLoad)
-        if (results.length === 0 || pageToLoad >= MAX_TMDB_PAGE) {
-          setHasMore(false)
-        }
+        setMovies(filtered)
+        setHasMore(false)
       })
       .catch(() => {
         setMoviesError('Unable to load movies from TMDB right now.')
       })
       .finally(() => {
-        if (replace) {
-          setIsLoadingMovies(false)
-        } else {
-          setIsLoadingMore(false)
-        }
+        setIsLoadingMovies(false)
         loadingPageRef.current = null
       })
   }
@@ -339,9 +305,7 @@ function App() {
     let isActive = true
     setMovies([])
     setCurrentIndex(0)
-    setPage(0)
     setHasMore(true)
-    setIsLoadingMore(false)
 
     // Fetch user's previous swipes, then load movies excluding those
     fetchUserSwipes(session.roomCode, session.userId)
@@ -349,13 +313,13 @@ function App() {
         if (!isActive) return
         const swipedSet = new Set(swipedIds)
         setSwipedMovieIds(swipedSet)
-        loadMovies(1, true, swipedSet)
+        loadMovies(swipedSet)
       })
       .catch(() => {
         // If fetching swipes fails, load movies anyway without filtering
         if (!isActive) return
         setSwipedMovieIds(new Set())
-        loadMovies(1, true)
+        loadMovies()
       })
 
     return () => {
@@ -371,20 +335,20 @@ function App() {
     let isActive = true
     const poll = async () => {
       try {
-        const ids = await fetchMatches(session.roomCode)
+        const matchesData = await fetchMatches(session.roomCode)
         if (!isActive) {
           return
         }
 
         setPollError(null)
         setMatches((prev) => {
-          const next = Array.from(new Set(ids))
-          const added = next.filter((id) => !prev.includes(id))
+          const prevIds = new Set(prev.map((m) => m.movieId))
+          const added = matchesData.filter((m) => !prevIds.has(m.movieId))
           if (added.length > 0) {
             setNewMatches(added)
             setShowMatchNotice(true)
           }
-          return next
+          return matchesData
         })
       } catch {
         if (!isActive) {
@@ -404,51 +368,34 @@ function App() {
     }
   }, [session])
 
+  // Fetch room users when session is active
   useEffect(() => {
-    if (!session || !hasMore || isLoadingMovies || isLoadingMore) {
+    if (!session) {
+      setRoomUsers([])
       return
     }
 
-    const remaining = movies.length - currentIndex
-    if (remaining <= PREFETCH_THRESHOLD) {
-      const nextPage = page > 0 ? page + 1 : 1
-      if (nextPage <= MAX_TMDB_PAGE) {
-        loadMovies(nextPage, false, swipedMovieIds)
+    let isActive = true
+    const fetchUsers = async () => {
+      try {
+        const users = await fetchRoomUsers(session.roomCode)
+        if (isActive) {
+          setRoomUsers(users)
+        }
+      } catch {
+        // Silently fail - room users are not critical
       }
     }
-  }, [
-    session,
-    hasMore,
-    isLoadingMovies,
-    isLoadingMore,
-    movies.length,
-    currentIndex,
-    page,
-    swipedMovieIds,
-  ])
 
-  useEffect(() => {
-    if (!session || !hasMore || isLoadingMovies || isLoadingMore) {
-      return
-    }
+    fetchUsers()
+    // Poll for room users every 10 seconds
+    const intervalId = window.setInterval(fetchUsers, 10000)
 
-    const hasActiveMovie = Boolean(movies[currentIndex])
-    if (!hasActiveMovie && movies.length > 0) {
-      const nextPage = page > 0 ? page + 1 : 1
-      if (nextPage <= MAX_TMDB_PAGE) {
-        loadMovies(nextPage, false, swipedMovieIds)
-      }
+    return () => {
+      isActive = false
+      window.clearInterval(intervalId)
     }
-  }, [
-    session,
-    hasMore,
-    isLoadingMovies,
-    isLoadingMore,
-    movies.length,
-    currentIndex,
-    page,
-    swipedMovieIds,
-  ])
+  }, [session])
 
   useEffect(() => {
     if (!expandedMovieId) {
@@ -614,15 +561,15 @@ function App() {
 
   const checkForNewMatches = async (roomCode: string) => {
     try {
-      const ids = await fetchMatches(roomCode)
+      const matchesData = await fetchMatches(roomCode)
       setMatches((prev) => {
-        const next = Array.from(new Set(ids))
-        const added = next.filter((id) => !prev.includes(id))
+        const prevIds = new Set(prev.map((m) => m.movieId))
+        const added = matchesData.filter((m) => !prevIds.has(m.movieId))
         if (added.length > 0) {
           setNewMatches(added)
           setShowMatchNotice(true)
         }
-        return next
+        return matchesData
       })
     } catch {
       // Silently fail - polling will catch it
@@ -787,24 +734,44 @@ function App() {
     }
   }
 
-  const handleStartSwiping = () => {
-    const nextSession = {
-      roomCode: generatedCode,
-      userId: draftUserId,
-      genreIds: selectedGenreIds,
-      providerIds: selectedProviderIds,
+  const handleStartSwiping = async () => {
+    const username = usernameInput.trim()
+    if (!username) {
+      setLobbyError('Please enter a username')
+      return
     }
 
-    setSession(nextSession)
-    saveSession(nextSession)
-    updateUrlWithRoom(generatedCode)
-    setLobbyMode('initial')
-    setMatches([])
-    setNewMatches([])
-    setShowMatchNotice(false)
-    setPollError(null)
-    setSwipeError(null)
-    setExpandedMovieId(null)
+    setIsJoining(true)
+    setLobbyError(null)
+
+    try {
+      const result = await joinRoom(generatedCode, username)
+      saveStoredUsername(result.username)
+
+      const nextSession = {
+        roomCode: generatedCode,
+        userId: result.userId,
+        username: result.username,
+        genreIds: selectedGenreIds,
+        providerIds: selectedProviderIds,
+      }
+
+      setSession(nextSession)
+      saveSession(nextSession)
+      updateUrlWithRoom(generatedCode)
+      setLobbyMode('initial')
+      setMatches([])
+      setNewMatches([])
+      setShowMatchNotice(false)
+      setPollError(null)
+      setSwipeError(null)
+      setExpandedMovieId(null)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not join room'
+      setLobbyError(message)
+    } finally {
+      setIsJoining(false)
+    }
   }
 
   const handleJoinMode = () => {
@@ -823,36 +790,13 @@ function App() {
   const handleStartSession = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    const code = lobbyMode === 'create' ? generatedCode : normalizeRoomCode(roomInput)
+    const code = normalizeRoomCode(roomInput)
     if (!code) {
       setLobbyError('Enter a room code to continue.')
       return
     }
 
-    if (lobbyMode === 'create') {
-      // Room already created when clicking "Create a Room"
-      const nextSession = {
-        roomCode: code,
-        userId: draftUserId,
-        genreIds: selectedGenreIds,
-        providerIds: selectedProviderIds,
-      }
-
-      setRoomInput(code)
-      setSession(nextSession)
-      saveSession(nextSession)
-      updateUrlWithRoom(code)
-      setLobbyMode('initial')
-      setMatches([])
-      setNewMatches([])
-      setShowMatchNotice(false)
-      setPollError(null)
-      setSwipeError(null)
-      setExpandedMovieId(null)
-      return
-    }
-
-    // Join mode - fetch room from server
+    // Join mode - fetch room from server, then prompt for username
     setIsJoining(true)
     setLobbyError(null)
 
@@ -864,17 +808,64 @@ function App() {
         return
       }
 
+      // Room exists, prompt for username
+      setPendingRoomCode(code)
+      setSelectedGenreIds(room.genreIds)
+      setSelectedProviderIds(room.providerIds)
+      setLobbyMode('enter-username')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Something went wrong'
+      setLobbyError(message)
+    } finally {
+      setIsJoining(false)
+    }
+  }
+
+  const handleWelcomeComplete = () => {
+    const username = usernameInput.trim()
+    if (!username) {
+      setLobbyError('Please enter a username')
+      return
+    }
+
+    saveStoredUsername(username)
+    markWelcomeCompleted()
+    setLobbyError(null)
+
+    // Check if we have a pending room from URL
+    if (pendingRoomCode) {
+      setLobbyMode('enter-username')
+    } else {
+      setLobbyMode('initial')
+    }
+  }
+
+  const handleJoinWithUsername = async () => {
+    const username = usernameInput.trim()
+    if (!username || !pendingRoomCode) {
+      setLobbyError('Please enter a username')
+      return
+    }
+
+    setIsJoining(true)
+    setLobbyError(null)
+
+    try {
+      const result = await joinRoom(pendingRoomCode, username)
+      saveStoredUsername(result.username)
+
       const nextSession = {
-        roomCode: code,
-        userId: draftUserId,
-        genreIds: room.genreIds,
-        providerIds: room.providerIds,
+        roomCode: pendingRoomCode,
+        userId: result.userId,
+        username: result.username,
+        genreIds: selectedGenreIds,
+        providerIds: selectedProviderIds,
       }
 
-      setRoomInput(code)
       setSession(nextSession)
       saveSession(nextSession)
-      updateUrlWithRoom(code)
+      updateUrlWithRoom(pendingRoomCode)
+      setPendingRoomCode(null)
       setLobbyMode('initial')
       setMatches([])
       setNewMatches([])
@@ -883,7 +874,7 @@ function App() {
       setSwipeError(null)
       setExpandedMovieId(null)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Something went wrong'
+      const message = error instanceof Error ? error.message : 'Could not join room'
       setLobbyError(message)
     } finally {
       setIsJoining(false)
@@ -898,15 +889,13 @@ function App() {
     setRoomInput('')
     setGeneratedCode('')
     setUrlCopied(false)
-    setDraftUserId(createUserId())
+    setPendingRoomCode(null)
     setSelectedGenreIds([])
     setSelectedProviderIds([])
     setMovies([])
     setCurrentIndex(0)
-    setPage(0)
     setHasMore(true)
     setIsLoadingMovies(false)
-    setIsLoadingMore(false)
     setSwipedMovieIds(new Set())
     setMatches([])
     setNewMatches([])
@@ -924,11 +913,9 @@ function App() {
 
     setMovies([])
     setCurrentIndex(0)
-    setPage(0)
     setHasMore(true)
     setMoviesError(null)
-    setIsLoadingMore(false)
-    loadMovies(1, true, swipedMovieIds)
+    loadMovies(swipedMovieIds)
   }
 
   const actionLabel =
@@ -952,33 +939,28 @@ function App() {
     .filter(Boolean)
     .join(' ')
 
-  const isLoadingDeck = isLoadingMovies || isLoadingMore
-  const emptyTitle = hasMore ? 'Loading more movies' : 'No more movies'
-  const emptyHint = hasMore
-    ? 'Fetching another batch from TMDB.'
-    : 'Try again later for more picks.'
+  const isLoadingDeck = isLoadingMovies
+  const emptyTitle = 'No more movies'
+  const emptyHint = 'Try again later for more picks.'
 
-  const renderMatchItem = (id: number) => {
-    const movie = movieLookup.get(id)
+  const renderMatchItem = (match: MatchWithLikers) => {
+    const movie = movieLookup.get(match.movieId)
     const poster = movie ? getPosterUrl(movie.poster_path) : null
 
     return (
       <button
         type="button"
         className="match-item"
-        key={`match-${id}`}
-        onClick={() => setExpandedMovieId(id)}
+        key={`match-${match.movieId}`}
+        onClick={() => setExpandedMovieId(match.movieId)}
       >
         {poster ? (
           <img className="match-thumb" src={poster} alt={movie?.title ?? ''} />
         ) : (
-          <div className="match-thumb fallback">#{id}</div>
+          <div className="match-thumb fallback">#{match.movieId}</div>
         )}
         <div className="match-info">
-          <span className="match-title">{movie?.title ?? `Movie #${id}`}</span>
-          {movie?.release_date ? (
-            <span className="match-sub">{movie.release_date.slice(0, 4)}</span>
-          ) : null}
+          <span className="match-title">{movie?.title ?? `Movie #${match.movieId}`}</span>
         </div>
       </button>
     )
@@ -1011,28 +993,110 @@ function App() {
           </button>
         ) : null}
         {session ? (
-          <div className="room-meta">
-            <span className="room-pill">Room {session.roomCode}</span>
-            {activeGenreLabels.length > 0 ? (
-              <span className="room-pill">
-                {activeGenreLabels.join(', ')}
-              </span>
+          <>
+            <div className="room-meta">
+              <span className="room-pill">Room {session.roomCode}</span>
+              {activeGenreLabels.length > 0 ? (
+                <span className="room-pill">
+                  {activeGenreLabels.join(', ')}
+                </span>
+              ) : null}
+              {activeProviderLabels.length > 0 ? (
+                <span className="room-pill">
+                  {activeProviderLabels.join(', ')}
+                </span>
+              ) : null}
+              <button type="button" className="link-button" onClick={handleReset}>
+                Exit room
+              </button>
+            </div>
+            {roomUsers.length > 0 ? (
+              <div className="room-users">
+                {roomUsers.map((u) => (
+                  <span key={u.userId} className="user-pill">
+                    {u.username}
+                  </span>
+                ))}
+              </div>
             ) : null}
-            {activeProviderLabels.length > 0 ? (
-              <span className="room-pill">
-                {activeProviderLabels.join(', ')}
-              </span>
-            ) : null}
-            <button type="button" className="link-button" onClick={handleReset}>
-              Exit room
-            </button>
-          </div>
+          </>
         ) : null}
       </header>
 
       {!session ? (
         <main className="lobby">
-          {isJoining && lobbyMode === 'initial' ? (
+          {lobbyMode === 'welcome' ? (
+            <div className="lobby-card welcome-card">
+              <h2>Welcome to Movie Matcher</h2>
+              <p>
+                Find movies everyone wants to watch. Create or join
+                a room, swipe on movies, and get matches when everyone likes
+                the same film.
+              </p>
+              <div className="lobby-join-input">
+                <label htmlFor="welcome-username">Your username</label>
+                <input
+                  id="welcome-username"
+                  type="text"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value.slice(0, 10))}
+                  placeholder=""
+                  maxLength={10}
+                  autoComplete="off"
+                />
+                <span className="lobby-join-hint">
+                  This is how others in your room will see you (max 10 characters)
+                </span>
+              </div>
+              {lobbyError ? (
+                <p className="lobby-error">{lobbyError}</p>
+              ) : null}
+              <button
+                type="button"
+                className="button primary lobby-submit"
+                onClick={handleWelcomeComplete}
+                disabled={usernameInput.trim().length === 0}
+              >
+                Get started
+              </button>
+            </div>
+          ) : lobbyMode === 'enter-username' ? (
+            <div className="lobby-card">
+              <button
+                type="button"
+                className="lobby-back"
+                onClick={handleBackToInitial}
+              >
+                Back
+              </button>
+              <div className="lobby-join-input">
+                <label htmlFor="join-username">Enter Your username to join</label>
+                <input
+                  id="join-username"
+                  type="text"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value.slice(0, 10))}
+                  placeholder=""
+                  maxLength={10}
+                  autoComplete="off"
+                />
+                <span className="lobby-join-hint">
+                  If this name is already in the room, you&apos;ll continue as that user
+                </span>
+              </div>
+              {lobbyError ? (
+                <p className="lobby-error">{lobbyError}</p>
+              ) : null}
+              <button
+                type="button"
+                className="button primary lobby-submit"
+                onClick={handleJoinWithUsername}
+                disabled={usernameInput.trim().length === 0 || isJoining}
+              >
+                {isJoining ? 'Joining...' : 'Join room'}
+              </button>
+            </div>
+          ) : isJoining && lobbyMode === 'initial' ? (
             <div className="lobby-loading">
               <span className="lobby-loading-text">Joining room...</span>
             </div>
@@ -1150,13 +1214,31 @@ function App() {
                 </button>
               </div>
 
+              <div className="lobby-join-input">
+                <label htmlFor="share-username">Your username</label>
+                <input
+                  id="share-username"
+                  type="text"
+                  value={usernameInput}
+                  onChange={(e) => setUsernameInput(e.target.value.slice(0, 10))}
+                  placeholder=""
+                  maxLength={10}
+                  autoComplete="off"
+                />
+              </div>
+
+              {lobbyError ? (
+                <p className="lobby-error">{lobbyError}</p>
+              ) : null}
+
               <div className="lobby-share-actions">
                 <button
                   type="button"
                   className="button primary lobby-submit"
                   onClick={handleStartSwiping}
+                  disabled={usernameInput.trim().length === 0 || isJoining}
                 >
-                  Start swiping
+                  {isJoining ? 'Joining...' : 'Start swiping'}
                 </button>
               </div>
             </div>
@@ -1376,7 +1458,16 @@ function App() {
         <div className="match-notice" role="dialog" aria-live="assertive">
           <div className="match-notice-card">
             <h3>It&apos;s a match!</h3>
-            <p>Everyone in the room liked this title.</p>
+            <p>
+              {(() => {
+                const otherLikers = newMatches.length > 0
+                  ? newMatches[0].likedBy.filter(name => name !== session?.username)
+                  : []
+                if (otherLikers.length === 0) return 'Everyone liked this title!'
+                if (otherLikers.length === 1) return `${otherLikers[0]} liked this too!`
+                return `${otherLikers.slice(0, -1).join(', ')} and ${otherLikers[otherLikers.length - 1]} liked this too!`
+              })()}
+            </p>
             <div className="match-list">
               {newMatches.map(renderMatchItem)}
             </div>

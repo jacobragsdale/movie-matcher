@@ -22,6 +22,23 @@ export type Room = {
   createdAt: string
 }
 
+export type RoomUser = {
+  userId: string
+  username: string
+}
+
+export type JoinRoomResult = {
+  roomCode: string
+  userId: string
+  username: string
+  isNewUser: boolean
+}
+
+export type MatchWithLikers = {
+  movieId: number
+  likedBy: string[]
+}
+
 const buildApiUrl = (path: string) => `${API_BASE_URL}${path}`
 
 export const sendSwipe = async (payload: SwipePayload) => {
@@ -43,7 +60,7 @@ export const sendSwipe = async (payload: SwipePayload) => {
   }
 }
 
-export const fetchMatches = async (roomCode: string) => {
+export const fetchMatches = async (roomCode: string): Promise<MatchWithLikers[]> => {
   const response = await fetch(
     buildApiUrl(`/api/matches/${encodeURIComponent(roomCode)}`),
   )
@@ -51,16 +68,14 @@ export const fetchMatches = async (roomCode: string) => {
     throw new Error('Failed to fetch matches')
   }
 
-  const data = (await response.json()) as unknown
-  const ids = Array.isArray(data)
-    ? data
-    : typeof data === 'object' && data !== null && 'matches' in data
-      ? (data as { matches?: unknown }).matches
-      : []
+  const data = (await response.json()) as {
+    matches?: Array<{ movie_id: number; liked_by: string[] }>
+  }
 
-  return Array.isArray(ids)
-    ? ids.filter((id): id is number => typeof id === 'number')
-    : []
+  return (data.matches ?? []).map((m) => ({
+    movieId: m.movie_id,
+    likedBy: m.liked_by ?? [],
+  }))
 }
 
 export const createRoom = async (payload: CreateRoomPayload): Promise<Room> => {
@@ -142,4 +157,61 @@ export const fetchUserSwipes = async (
 
   const data = (await response.json()) as { swiped_movie_ids?: number[] }
   return data.swiped_movie_ids ?? []
+}
+
+export const joinRoom = async (
+  roomCode: string,
+  username: string,
+): Promise<JoinRoomResult> => {
+  const response = await fetch(
+    buildApiUrl(`/api/rooms/${encodeURIComponent(roomCode)}/join`),
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ username }),
+    },
+  )
+
+  if (response.status === 404) {
+    throw new Error('Room not found')
+  }
+
+  if (!response.ok) {
+    throw new Error('Failed to join room')
+  }
+
+  const data = (await response.json()) as {
+    room_code: string
+    user_id: string
+    username: string
+    is_new_user: boolean
+  }
+
+  return {
+    roomCode: data.room_code,
+    userId: data.user_id,
+    username: data.username,
+    isNewUser: data.is_new_user,
+  }
+}
+
+export const fetchRoomUsers = async (roomCode: string): Promise<RoomUser[]> => {
+  const response = await fetch(
+    buildApiUrl(`/api/rooms/${encodeURIComponent(roomCode)}/users`),
+  )
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch room users')
+  }
+
+  const data = (await response.json()) as {
+    users?: Array<{ user_id: string; username: string }>
+  }
+
+  return (data.users ?? []).map((u) => ({
+    userId: u.user_id,
+    username: u.username,
+  }))
 }

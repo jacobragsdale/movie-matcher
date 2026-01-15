@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -62,6 +63,39 @@ class RoomResponse(BaseModel):
   created_at: str
 
 
+class JoinRoomRequest(BaseModel):
+  username: str
+
+
+class JoinRoomResponse(BaseModel):
+  room_code: str
+  user_id: str
+  username: str
+  is_new_user: bool
+
+
+class RoomUser(BaseModel):
+  user_id: str
+  username: str
+
+
+class RoomUsersResponse(BaseModel):
+  users: list[RoomUser]
+
+
+class MatchLiker(BaseModel):
+  username: str
+
+
+class MatchWithLikers(BaseModel):
+  movie_id: int
+  liked_by: list[str]
+
+
+class MatchesResponse(BaseModel):
+  matches: list[MatchWithLikers]
+
+
 def get_connection() -> sqlite3.Connection:
   DB_PATH.parent.mkdir(parents=True, exist_ok=True)
   connection = sqlite3.connect(DB_PATH)
@@ -92,6 +126,20 @@ def init_db() -> None:
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(room_code, user_id, movie_id)
+      )
+      """
+    )
+    connection.execute(
+      """
+      CREATE TABLE IF NOT EXISTS room_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_code TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_active_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(room_code, user_id),
+        UNIQUE(room_code, username COLLATE NOCASE)
       )
       """
     )
@@ -126,14 +174,20 @@ def record_swipe(payload: SwipeRequest) -> dict[str, str]:
       """,
       (payload.room_code, payload.user_id, payload.movie_id, payload.direction),
     )
+    # Update user's last_active_at
+    connection.execute(
+      'UPDATE room_users SET last_active_at = CURRENT_TIMESTAMP WHERE room_code = ? AND user_id = ?',
+      (payload.room_code, payload.user_id),
+    )
 
   return {'status': 'ok'}
 
 
 @app.get('/api/matches/{room_code}')
-def get_matches(room_code: str) -> dict[str, list[int]]:
+def get_matches(room_code: str) -> MatchesResponse:
   with get_connection() as connection:
-    rows = connection.execute(
+    # Get movies that meet the match threshold
+    movie_rows = connection.execute(
       """
       SELECT movie_id, COUNT(*) as right_count
       FROM swipes
@@ -145,8 +199,24 @@ def get_matches(room_code: str) -> dict[str, list[int]]:
       (room_code, MATCH_THRESHOLD),
     ).fetchall()
 
-  matches = [int(row['movie_id']) for row in rows]
-  return {'matches': matches}
+    matches = []
+    for movie_row in movie_rows:
+      movie_id = int(movie_row['movie_id'])
+      # Get usernames who liked this movie
+      user_rows = connection.execute(
+        """
+        SELECT ru.username
+        FROM swipes s
+        JOIN room_users ru ON s.room_code = ru.room_code AND s.user_id = ru.user_id
+        WHERE s.room_code = ? AND s.movie_id = ? AND s.direction = 'right'
+        ORDER BY ru.username ASC
+        """,
+        (room_code, movie_id),
+      ).fetchall()
+      liked_by = [row['username'] for row in user_rows]
+      matches.append(MatchWithLikers(movie_id=movie_id, liked_by=liked_by))
+
+  return MatchesResponse(matches=matches)
 
 
 @app.get('/api/health')
@@ -218,6 +288,67 @@ def get_room(room_code: str) -> RoomResponse:
     provider_ids=json.loads(row['provider_ids']),
     created_at=row['created_at'],
   )
+
+
+@app.post('/api/rooms/{room_code}/join')
+def join_room(room_code: str, payload: JoinRoomRequest) -> JoinRoomResponse:
+  username = payload.username.strip()[:10]
+  if not username:
+    raise HTTPException(status_code=400, detail='Username is required')
+
+  with get_connection() as connection:
+    # Check if room exists
+    room = connection.execute(
+      'SELECT room_code FROM rooms WHERE room_code = ?',
+      (room_code,),
+    ).fetchone()
+    if not room:
+      raise HTTPException(status_code=404, detail='Room not found')
+
+    # Check if username already exists in this room (case-insensitive)
+    existing = connection.execute(
+      'SELECT user_id, username FROM room_users WHERE room_code = ? AND username = ? COLLATE NOCASE',
+      (room_code, username),
+    ).fetchone()
+
+    if existing:
+      # Update last_active_at and return existing user
+      connection.execute(
+        'UPDATE room_users SET last_active_at = CURRENT_TIMESTAMP WHERE room_code = ? AND user_id = ?',
+        (room_code, existing['user_id']),
+      )
+      return JoinRoomResponse(
+        room_code=room_code,
+        user_id=existing['user_id'],
+        username=existing['username'],
+        is_new_user=False,
+      )
+
+    # Create new user
+    user_id = str(uuid.uuid4())[:8]
+    connection.execute(
+      'INSERT INTO room_users (room_code, user_id, username) VALUES (?, ?, ?)',
+      (room_code, user_id, username),
+    )
+
+    return JoinRoomResponse(
+      room_code=room_code,
+      user_id=user_id,
+      username=username,
+      is_new_user=True,
+    )
+
+
+@app.get('/api/rooms/{room_code}/users')
+def get_room_users(room_code: str) -> RoomUsersResponse:
+  with get_connection() as connection:
+    rows = connection.execute(
+      'SELECT user_id, username FROM room_users WHERE room_code = ? ORDER BY created_at ASC',
+      (room_code,),
+    ).fetchall()
+
+  users = [RoomUser(user_id=row['user_id'], username=row['username']) for row in rows]
+  return RoomUsersResponse(users=users)
 
 
 def resolve_static_dir() -> Path | None:
